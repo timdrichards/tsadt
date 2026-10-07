@@ -1,5 +1,6 @@
-// Source-to-source translation of `data` declarations and `match` expressions
-// into plain TypeScript. Everything else is copied through untouched.
+// Source-to-source translation into plain TypeScript of the three new forms:
+// `data` declarations (with `deriving`), `match` expressions, and top-level
+// clause functions. Everything else is copied through untouched.
 
 import { checkMatch } from "./exhaustive.js";
 import { Token, TsadtError, tokenize } from "./lexer.js";

@@ -5,10 +5,10 @@
 [![CI](https://github.com/timdrichards/tsadt/actions/workflows/ci.yml/badge.svg)](https://github.com/timdrichards/tsadt/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Write `data` types and `match` expressions the way you would in OCaml, Haskell
-or Rust. `tsadt` compiles them to ordinary TypeScript (or straight to
-JavaScript), checks that every match is exhaustive, and reports type errors
-against the lines you wrote.
+Write `data` types, `match` expressions and clause-by-clause functions the way
+you would in OCaml, Haskell or Rust. `tsadt` compiles them to ordinary
+TypeScript (or straight to JavaScript), checks that every match is
+exhaustive, and reports type errors against the lines you wrote.
 
 ```ts
 data Expr =
@@ -39,19 +39,19 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
 ## Features
 
 - **`data` declarations** with named or positional fields, generics,
-  constraints and defaults, and qualified constructor names (`Shape.Circle`)
-  so types can share constructor names.
+  constraints and defaults. Values are immutable, and nullary constructors
+  like `Nil` work for every type argument. Qualified constructor names
+  (`Shape.Circle`) let types share constructor names.
 - **`deriving (Eq, Ord, Show)`** for structural equality, ordering and
   printing, with dictionary passing for type parameters.
-- **Clause functions**, `length(Nil): number => 0` and
-  `length(Cons(_, t)) => 1 + length(t)`, with parameter types inferred from
-  the patterns. Values are immutable, and nullary constructors
-  like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
   wildcards, or-patterns, named-field patterns, `x @ pattern` bindings,
-  `if` guards and block bodies. Match
-  several values at once with `match (a, b) { (p, q) => ... }`. A `match` is
-  an expression, so it nests and composes.
+  `if` guards and block bodies. Match several values at once with
+  `match (a, b) { (p, q) => ... }`. A `match` is an expression, so it nests
+  and composes.
+- **Clause functions**, `length(Nil): number => 0` and
+  `length(Cons(_, t)) => 1 + length(t)`, with parameter types inferred from
+  the patterns.
 - **Exhaustiveness and redundancy checking** using Maranget's usefulness
   algorithm, the one OCaml and Rust use. Missing cases are errors with a
   counterexample; unreachable arms are warnings.
@@ -132,7 +132,9 @@ data Pair = Pair(number, string);     // positional fields are named _0, _1
 
 Each declaration produces a union type, a constructor function for each
 variant with fields, and a constant for each variant without. Constructor
-names start with an uppercase letter.
+names start with an uppercase letter. An object named after the type, such
+as `Shape`, also holds its constructors and any derived operations; it is
+generated when the type is exported or the file uses it (`Shape.Circle`).
 
 Every constructor can also be written qualified by its type, in expressions
 and in patterns: `Shape.Circle(1)`, `Option.None`, `List.Cons(h, t)`. That
@@ -219,6 +221,7 @@ match (value) {
 | `_`                                  | anything                                    |
 | `x`                                  | anything, binding it to `x`                 |
 | `Some(x)`, `Cons(h, Cons(_, t))`     | a constructor, with nested field patterns   |
+| `Option.None`, `List.Cons(h, t)`     | a constructor named with its type           |
 | `0`, `-1`, `"hi"`                    | a number or string literal                  |
 | `true`, `false`, `null`, `undefined` | that value                                  |
 | `t @ Cons(_, _)`                     | what the inner pattern matches, also binding `t` |
@@ -289,6 +292,8 @@ const fizz = (n: number) => match (n % 3, n % 5) {
 
 Exhaustiveness is checked across all the values together, and a missing case
 is reported as a tuple, such as `no arm covers (Some(_), None)`.
+
+`match` works on ordinary values too, with literal patterns and guards:
 
 ```ts
 const describe = (code: number) => match (code) {
@@ -372,7 +377,20 @@ signature.
 ### What it compiles to
 
 <details>
-<summary>Generated TypeScript for <code>List</code> and a <code>match</code></summary>
+<summary>Generated TypeScript for <code>List</code> and a clause function</summary>
+
+From this input:
+
+```ts
+export data List<T> = Nil | Cons(head: T, tail: List<T>) deriving (Eq);
+
+export last(Nil): Option<T> => None
+last(Cons(x, Nil)) => Some(x)
+last(Cons(_, rest)) => last(rest)
+```
+
+tsadt produces (the generic `__tsadt_eq` helper, emitted once at the top of
+the file, is omitted here):
 
 ```ts
 export type List<T> =
@@ -382,22 +400,32 @@ export const Nil: List<never> = { tag: "Nil" };
 export function Cons<T>(head: T, tail: List<T>): List<T> {
   return { tag: "Cons", head, tail };
 }
-
-export function last<T>(xs: List<T>): Option<T> {
-  return ((__m2) => {
-    if (__m2.tag === "Nil") {
+function __List_equals<T>(a: List<T>, b: List<T>, eqT: (x: T, y: T) => boolean = __tsadt_eq): boolean {
+  if (a.tag !== b.tag) return false;
+  if (a.tag === "Nil" && b.tag === "Nil") return true;
+  if (a.tag === "Cons" && b.tag === "Cons") return eqT(a.head, b.head) && __List_equals(a.tail, b.tail, eqT);
+  return false;
+}
+export const List = {
+  Nil,
+  Cons,
+  equals: __List_equals,
+} as const;
+export function last<T>(list: List<T>): Option<T> {
+  return ((__m0) => {
+    if (__m0.tag === "Nil") {
       return None;
     }
-    if (__m2.tag === "Cons" && __m2.tail.tag === "Nil") {
-      const x = __m2.head;
+    if (__m0.tag === "Cons" && __m0.tail.tag === "Nil") {
+      const x = __m0.head;
       return Some(x);
     }
-    if (__m2.tag === "Cons") {
-      const rest = __m2.tail;
+    if (__m0.tag === "Cons") {
+      const rest = __m0.tail;
       return last(rest);
     }
-    throw new Error("match failure at list.tsa:28:10");
-  })(xs);
+    throw new Error("match failure at list.tsa:4:8");
+  })(list);
 }
 ```
 
@@ -412,11 +440,13 @@ can be a `List<never>` and still serve as a `List<T>` for any `T`.
    handling strings, template literals, comments and regex literals.
 2. **Register.** A first pass over every input collects all `data`
    declarations, so constructors resolve across files.
-3. **Translate.** Only `data` and `match` are parsed. Everything else is
-   copied through verbatim. Patterns are checked for exhaustiveness and
-   redundancy, then compiled to tag tests and bindings inside an immediately
-   invoked arrow function, which keeps `this` and becomes `async` if an arm
-   uses `await`.
+3. **Translate.** Only the new forms are parsed: `data` declarations (with
+   their `deriving` functions), `match` expressions, and top-level clause
+   functions, which become a function around a `match`. Everything else is
+   copied through verbatim. Constructor names in patterns are resolved to
+   their types, then checked for exhaustiveness and redundancy, then
+   compiled to tag tests and bindings inside an immediately invoked arrow
+   function, which keeps `this` and becomes `async` if an arm uses `await`.
 4. **Map.** Every piece of output remembers the source position it came from,
    so compiler errors can be reported against the `.tsa` file.
 5. **Emit.** Optionally, the TypeScript compiler API type checks the result
@@ -426,7 +456,7 @@ can be a `List<never>` and still serve as a `List<T>` for any `T`.
 src/lexer.ts        tokenizer
 src/registry.ts     constructor registry and pattern AST
 src/exhaustive.ts   exhaustiveness and redundancy checking
-src/transpiler.ts   parsing of data and match, code generation
+src/transpiler.ts   parsing of data, match and clause functions; code generation
 src/mapped.ts       output text with a map back to source positions
 src/derive.ts       deriving (Eq, Ord, Show)
 src/emit.ts         type checking and JavaScript output via the TS compiler API
@@ -444,10 +474,12 @@ There is also a library API in `dist/index.js`: `transpile`,
 - An expression arm ends at the first comma outside brackets, so a body like
   `new Map<string, number>()` needs parentheses. Likewise a comma in the
   `match (...)` header separates values, so a call with explicit type
-  arguments there, like `f<A, B>(x)`, needs its own parentheses. Object literal bodies need
-  them too, as with arrow functions: `A => ({ x: 1 })`.
+  arguments there, like `f<A, B>(x)`, needs its own parentheses. Object
+  literal bodies need them too, as with arrow functions: `A => ({ x: 1 })`.
 - `yield` inside an arm does not work, and a `match` inside a template
   literal's `${...}` is not translated.
+- Clause functions must be at the top level of a file, and their types are
+  inferred from patterns only, so some need annotations (see above).
 - Runtime stack traces point at the generated `.js`.
 - There is no editor support yet, and no `.tsx`.
 
