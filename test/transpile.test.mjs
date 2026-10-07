@@ -565,3 +565,62 @@ test("constructors shared across files resolve against each file's types", () =>
   const r = transpile(c, "c.tsa", reg);
   assert.deepEqual(r.diagnostics, []);
 });
+
+// ----------------------------------------------------------------- deriving
+
+const DERIV = `export data Option<T> = None | Some(value: T) deriving (Eq, Ord, Show);
+export data List<T> = Nil | Cons(head: T, tail: List<T>) deriving (Eq, Ord, Show);
+`;
+
+test("deriving Eq, Ord and Show", () => {
+  const out = run(DERIV + `
+    export data Shape = Circle(r: number) | Rect(w: number, h: number) | Poly(points: [number, number][]) deriving (Eq, Ord, Show);
+    export data Point = Point(x: number, y: number) deriving (Eq, Show);
+    const xs = Cons(1, Cons(2, Nil)), ys = Cons(1, Cons(2, Nil));
+    console.log(xs === ys, List.equals(xs, ys), List.equals(xs, Cons(1, Nil)), List.show(xs), List.show(Cons("a", Nil)));
+    console.log(List.compare(xs, Cons(1, Nil)), List.compare(Nil, xs), List.compare(xs, ys), Option.compare(None, Some(3)));
+    // a type argument's operation is passed explicitly
+    console.log(List.equals(Cons(Some(1), Nil), Cons(Some(1), Nil), Option.equals), List.compare(Cons(Some(1), Nil), Cons(None, Nil), Option.compare));
+    console.log(List.show(Cons(Some(Circle(2)), Nil), (o) => Option.show(o, Shape.show)));
+    console.log([Rect(1, 2), Circle(5), Poly([[0, 0], [1, 1]]), Circle(1)].sort(Shape.compare).map(Shape.show).join(" "));
+    console.log(Point.equals(Point(1, 2), Point(1, 2)), Point.show(Point(3, 4)));`);
+  assert.equal(out, [
+    "false true false Cons(1, Cons(2, Nil)) Cons(\"a\", Nil)",
+    "1 -1 0 -1",
+    "true 1",
+    "Cons(Some(Circle(2)), Nil)",
+    "Circle(1) Circle(5) Rect(1, 2) Poly([[0, 0], [1, 1]])",
+    "true Point(3, 4)",
+    "",
+  ].join("\n"));
+});
+
+test("ordering values of a type parameter without a comparator explains itself", () => {
+  const out = run(DERIV + `
+    try { List.compare(Cons(Some(1), Nil), Cons(None, Nil)); } catch (e) { console.log((e as Error).message); }`);
+  assert.equal(out, "tsadt: cannot order Some(1) and None without knowing their type; pass a comparator for the type parameter, as in List.compare(xs, ys, Option.compare)\n");
+});
+
+test("derived code passes noUnusedLocals and noUnusedParameters, with only the helpers it needs", () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, "tsconfig.json"), '{"compilerOptions":{"strict":true,"noUnusedLocals":true,"noUnusedParameters":true,"target":"ES2022","module":"NodeNext"}}');
+  fs.writeFileSync(path.join(dir, "a.tsa"), "export data Phantom<T> = Tagged(n: number) deriving (Eq, Ord, Show);\n");
+  const r = cli(path.join(dir, "a.tsa"), "--check", "--tsconfig", path.join(dir, "tsconfig.json"));
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(fs.readFileSync(path.join(dir, "a.ts"), "utf8"), /_eqT: \(x: T, y: T\) => boolean = __tsadt_eq/);
+  const { code } = ok("export data P = P(x: number) deriving (Show);");
+  assert.match(code, /function __tsadt_show/);
+  assert.doesNotMatch(code, /function __tsadt_eq|function __tsadt_cmp/);
+  assert.doesNotMatch(ok("export data T = A | B(n: number);").code, /__tsadt/);
+});
+
+test("deriving errors", () => {
+  assert.deepEqual(errorsOf(`export data T = A deriving (Hash);`), ["Cannot derive 'Hash'; tsadt can derive Eq, Ord and Show"]);
+  assert.deepEqual(errorsOf(`export data T = A | B deriving (Eq, Eq);`), ["'Eq' is derived twice"]);
+  assert.deepEqual(errorsOf(`export data S = C(r: number);\nexport data Box = Box(s: S) deriving (Eq);`), [
+    "Box derives Eq, so its field type S must too: add deriving (Eq) to S",
+  ]);
+  assert.deepEqual(errorsOf(`export data Unit = Unit deriving (Show);`), [
+    "Unit.show has nowhere to go: the name Unit is already the value of its constructor Unit. Rename the type or the constructor.",
+  ]);
+});

@@ -1,5 +1,6 @@
-// Option: a value that may be absent.
-export data Option<T> = None | Some(value: T);
+// Option: a value that may be absent. `deriving` adds Option.equals,
+// Option.compare and Option.show.
+export data Option<T> = None | Some(value: T) deriving (Eq, Ord, Show);
 
 export function getOrElse<T>(o: Option<T>, fallback: T): T {
   return match (o) {

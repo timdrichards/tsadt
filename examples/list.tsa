@@ -1,7 +1,7 @@
 // A generic immutable linked list.
 import { Option, Some, None } from "./option.js";
 
-export data List<T> = Nil | Cons(head: T, tail: List<T>);
+export data List<T> = Nil | Cons(head: T, tail: List<T>) deriving (Eq, Ord, Show);
 
 export function fromArray<T>(xs: readonly T[]): List<T> {
   let out: List<T> = Nil;

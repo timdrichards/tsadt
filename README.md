@@ -40,7 +40,9 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
 
 - **`data` declarations** with named or positional fields, generics,
   constraints and defaults, and qualified constructor names (`Shape.Circle`)
-  so types can share constructor names. Values are immutable, and nullary constructors
+  so types can share constructor names.
+- **`deriving (Eq, Ord, Show)`** for structural equality, ordering and
+  printing, with dictionary passing for type parameters. Values are immutable, and nullary constructors
   like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
   wildcards, or-patterns, named-field patterns, `x @ pattern` bindings,
@@ -156,6 +158,48 @@ A bare constructor name in a pattern is fine when only one type uses it, or
 when the other constructors in the same match settle which type is meant.
 Otherwise tsadt asks you to qualify it. In expressions, a name that two types
 in the same file share exists only in qualified form.
+
+### Deriving equality, ordering and printing
+
+`===` compares objects by identity, so two separately built `Some(1)` values
+are not `===`. Add `deriving` to get structural operations, specialized to the
+type and added to its namespace:
+
+```ts
+export data Option<T> = None | Some(value: T) deriving (Eq, Ord, Show);
+export data List<T> = Nil | Cons(head: T, tail: List<T>) deriving (Eq, Ord, Show);
+
+List.equals(Cons(1, Nil), Cons(1, Nil));        // true
+List.compare(Cons(1, Nil), Cons(2, Nil));       // -1
+List.show(Cons("a", Cons("b", Nil)));           // 'Cons("a", Cons("b", Nil))'
+shapes.sort(Shape.compare);
+```
+
+| Class  | Adds                         | Meaning                                                          |
+| ------ | ---------------------------- | ---------------------------------------------------------------- |
+| `Eq`   | `T.equals(a, b): boolean`    | same constructor and equal fields                                |
+| `Ord`  | `T.compare(a, b): number`    | constructors in declaration order, then fields left to right; -1, 0 or 1 |
+| `Show` | `T.show(a): string`          | constructor syntax you could paste back into a `.tsa` file       |
+
+Each field is handled according to its declared type. A data type that
+derives the same class uses its own operation, arrays go element by element,
+and numbers, strings, records and the like use a generic structural
+helper. Every data type used in a field must derive the class too, and
+tsadt tells you if one does not.
+
+Type parameters work the way Haskell implements type classes: each one
+becomes an optional extra argument for the element type's operation. It
+defaults to the generic helper, which is fine for numbers and strings; for a
+data type, pass its operation:
+
+```ts
+List.equals(xs, ys, Option.equals);              // List<Option<number>>
+List.compare(xs, ys, Option.compare);
+List.show(xs, (o) => Option.show(o, Shape.show)); // List<Option<Shape>>
+```
+
+Ordering two different constructors of an unknown element type needs that
+comparator, and the generic helper says so if it is missing.
 
 ### Matching
 
@@ -311,6 +355,7 @@ src/registry.ts     constructor registry and pattern AST
 src/exhaustive.ts   exhaustiveness and redundancy checking
 src/transpiler.ts   parsing of data and match, code generation
 src/mapped.ts       output text with a map back to source positions
+src/derive.ts       deriving (Eq, Ord, Show)
 src/emit.ts         type checking and JavaScript output via the TS compiler API
 src/cli.ts          command line driver
 examples/           Option, List, an expression language, and a runner
@@ -335,7 +380,9 @@ There is also a library API in `dist/index.js`: `transpile`,
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for the full list. Next up: `deriving (Eq, Show, Ord)`.
+See [TODO.md](TODO.md) for the full list. Next up: a type and a type guard for
+each variant (`Shape.Circle`, `isCircle`), then exhaustiveness checking
+driven by TypeScript's own types.
 
 ## Development
 

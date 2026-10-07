@@ -1,8 +1,8 @@
 // Runs every example. Also shows that ordinary uses of the words `data` and
 // `match` are left alone.
-import { fromArray, map, sum, last, pairs, show as showList } from "./list.js";
+import { List, fromArray, map, sum, last, pairs, show as showList } from "./list.js";
 import { Add, Mul, Neg, Num, Var, evaluate, simplify, show as showExpr } from "./expr.js";
-import { showOption } from "./option.js";
+import { Option, Some, showOption } from "./option.js";
 
 data Shape =
   | Circle(radius: number)
@@ -68,3 +68,8 @@ const e = Add(Mul(Num(1), Var("x")), Neg(Neg(Add(Num(2), Num(0)))));
 console.log(showExpr(e), "=>", showExpr(simplify(e)));
 console.log(showOption(evaluate(e, new Map([["x", 40]]))), showOption(evaluate(e, new Map())));
 console.log(volume(Level.None), volume(Low), volume(High));
+
+// Derived operations: structural equality, ordering and printing. For a type
+// parameter, pass the element type's operation (here Option.show).
+const a = fromArray([1, 2, 3]), b = fromArray([1, 2, 3]);
+console.log(a === b, List.equals(a, b), List.compare(a, fromArray([1, 2])), List.show(map(a, (x) => Some(x)), Option.show));

@@ -9,7 +9,18 @@ export interface CtorInfo {
   pos: number;
   /** Source offsets [start, end) of each field type, for exact error mapping. */
   typeSpans: Array<[number, number]>;
+  /** Each field type's shape, as far as `deriving` needs to know it. */
+  typeAsts: TypeAst[];
 }
+
+/**
+ * A field type, parsed just enough for `deriving`: a named type with
+ * arguments (`List<T>`), an array (`T[]`, `Array<T>`), or anything else.
+ */
+export type TypeAst =
+  | { k: "ref"; name: string; args: TypeAst[] }
+  | { k: "array"; elem: TypeAst }
+  | { k: "opaque" };
 
 export interface DataDecl {
   name: string;
@@ -20,6 +31,9 @@ export interface DataDecl {
   /** Source offsets [start, end) of paramText, or null if there are none. */
   paramSpan: [number, number] | null;
   ctors: CtorInfo[];
+  /** Derived operations: any of "Eq", "Ord", "Show". */
+  deriving: string[];
+  derivingPos: number;
   file: string;
   pos: number;
 }

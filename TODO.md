@@ -20,10 +20,14 @@ priority order.
 - [x] Or-patterns: `Circle(_) | Rect(_, _) => ...`, anywhere in a pattern, with the same variables bound in every alternative
 - [x] Named-field patterns: `Rect { width, height: h }`
 - [x] Qualified constructors (`Shape.Circle`), removing the global uniqueness rule
+- [x] `deriving (Eq, Ord, Show)`: structural equality, ordering and printing
 
 ## Next up
 
-- [ ] `deriving (Eq, Show, Ord)`: structural equality, printing, comparison
+- [ ] A type and a type guard for each variant: `Shape.Circle`, `isCircle(s)`
+- [ ] Type-directed exhaustiveness using the TypeScript checker: finite
+      literal unions and TS enums, hand-written or imported discriminated
+      unions, and early errors for patterns of the wrong type
 
 ## Patterns
 
@@ -35,18 +39,11 @@ priority order.
 
 ## Data declarations
 
-- [ ] A type and a type guard for each variant: `Shape.Circle`, `isCircle(s)`
 - [ ] Enums: all-nullary types compile to string literal unions (`"Red" | "Green"`)
 - [ ] Newtypes: `newtype UserId = UserId(string)` as a zero-cost branded type
 - [ ] Variant-preserving update: `p with { radius: 2 }`
 - [ ] GADTs: constructors that fix the type parameter, `Lit(n: number): Expr<number>`
 - [ ] Existential types
-
-## Checking
-
-- [ ] Type-directed exhaustiveness using the TypeScript checker: finite
-      literal unions and TS enums, hand-written or imported discriminated
-      unions, and early errors for patterns of the wrong type
 
 ## Code generation
 

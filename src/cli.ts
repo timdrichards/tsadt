@@ -91,10 +91,18 @@ function main(argv: string[]): number {
   const reg = new Registry();
   const sources = inputs.map((inp) => ({ ...inp, src: fs.readFileSync(inp.file, "utf8") }));
   const diags: Diagnostic[] = [];
-  for (const s of sources) diags.push(...collectDataDecls(s.src, s.file, reg, opts));
+  // A file whose declarations failed to parse is not translated: that would
+  // report the same errors a second time.
+  const broken = new Set<string>();
+  for (const s of sources) {
+    const ds = collectDataDecls(s.src, s.file, reg, opts);
+    diags.push(...ds);
+    if (ds.some((d) => d.severity === "error")) broken.add(s.file);
+  }
 
   const generated: Generated[] = [];
   for (const s of sources) {
+    if (broken.has(s.file)) continue;
     const res = transpile(s.src, s.file, reg, opts);
     diags.push(...res.diagnostics);
     if (res.diagnostics.some((d) => d.severity === "error")) continue;

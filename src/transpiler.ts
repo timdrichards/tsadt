@@ -3,8 +3,9 @@
 
 import { checkMatch } from "./exhaustive.js";
 import { Token, TsadtError, tokenize } from "./lexer.js";
+import { DERIVABLE, deriveFunction, derivedFunctionName, helperSource, parseTypeAst } from "./derive.js";
 import { Mapped } from "./mapped.js";
-import { boundNames, CtorInfo, CtorPattern, DataDecl, Pattern, Registry, showPattern } from "./registry.js";
+import { boundNames, CtorInfo, CtorPattern, DataDecl, Pattern, Registry, showPattern, TypeAst } from "./registry.js";
 
 export interface Diagnostic {
   severity: "error" | "warning";
@@ -59,6 +60,8 @@ class Transpiler {
   readonly diags: Diagnostic[] = [];
   private lineStarts: number[] = [0];
   private counter = 0;
+  /** Generic helpers that derived operations in this file use. */
+  private helpers = new Set<string>();
   private tag: string;
 
   constructor(
@@ -200,9 +203,12 @@ class Transpiler {
     const m = new Mapped();
     if (this.toks.length === 0) return m.copy(this.src, 0, this.src.length);
     const n = this.toks.length;
+    const body = this.transform(0, n);
+    // Helpers for derived operations go after the file's leading comments.
     return m
       .copy(this.src, 0, this.toks[0].start)
-      .add(this.transform(0, n))
+      .gen(helperSource(this.helpers, this.tag), this.toks[0].start)
+      .add(body)
       .copy(this.src, this.toks[n - 1].end, this.src.length);
   }
 
@@ -264,6 +270,7 @@ class Transpiler {
       const fields: string[] = [];
       const types: string[] = [];
       const typeSpans: Array<[number, number]> = [];
+      const typeAsts: TypeAst[] = [];
       if (this.text(j) === "(") {
         const close = this.matching(j);
         this.splitCommas(j + 1, close, true).forEach(([s, e], idx) => {
@@ -274,6 +281,7 @@ class Transpiler {
           fields.push(named ? this.toks[s].text : `_${idx}`);
           types.push(this.slice(ts, e));
           typeSpans.push([this.toks[ts].start, this.toks[e - 1].end]);
+          typeAsts.push(parseTypeAst(this.toks.slice(ts, e)));
           if (fields.at(-1) === this.tag) {
             throw new TsadtError(`Field name '${this.tag}' is reserved for the discriminant`, this.posOf(s));
           }
@@ -283,12 +291,37 @@ class Transpiler {
         j = close + 1;
       }
       if (ctors.some((c) => c.name === t.text)) throw new TsadtError(`Constructor '${t.text}' appears twice in ${name}`, t.start);
-      ctors.push({ name: t.text, typeName: name, fields, types, pos: t.start, typeSpans });
+      ctors.push({ name: t.text, typeName: name, fields, types, pos: t.start, typeSpans, typeAsts });
       if (this.text(j) !== "|") break;
       j++;
     }
+    // deriving (Eq, Ord, Show)  or  deriving Eq
+    const deriving: string[] = [];
+    let derivingPos = pos;
+    if (this.text(j) === "deriving") {
+      derivingPos = this.posOf(j);
+      j++;
+      let names: number[];
+      if (this.text(j) === "(") {
+        const close = this.matching(j);
+        names = this.splitCommas(j + 1, close, false).filter(([a, b]) => a < b).map(([a, b]) => {
+          if (b !== a + 1) throw new TsadtError("Expected a class name such as Eq, Ord or Show", this.posOf(a));
+          return a;
+        });
+        j = close + 1;
+      } else {
+        names = [j];
+        j++;
+      }
+      for (const k of names) {
+        const cls = this.text(k)!;
+        if (!DERIVABLE.has(cls)) throw new TsadtError(`Cannot derive '${cls}'; tsadt can derive Eq, Ord and Show`, this.posOf(k));
+        if (deriving.includes(cls)) throw new TsadtError(`'${cls}' is derived twice`, this.posOf(k));
+        deriving.push(cls);
+      }
+    }
     if (this.text(j) === ";") j++;
-    return { decl: { name, params, paramText, paramSpan, ctors, file: this.file, pos }, next: j };
+    return { decl: { name, params, paramText, paramSpan, ctors, deriving, derivingPos, file: this.file, pos }, next: j };
   }
 
   collect(): void {
@@ -372,8 +405,15 @@ class Transpiler {
     // be used: the type is exported, this file writes `Shape.`, or a clash
     // leaves some constructor reachable no other way. (Always emitting it
     // would trip noUnusedLocals.)
+    // Derived operations: one function each, also reachable as Shape.equals etc.
+    const derived = d.deriving.map((cls) => ({ member: DERIVABLE.get(cls)!, fn: derivedFunctionName(d.name, cls) }));
+    for (const cls of d.deriving) {
+      const ctx = { reg: this.reg, file: this.file, tag, helpers: this.helpers, error: (msg: string, at: number) => this.report("error", msg, at) };
+      m.gen(NL + deriveFunction(d, cls, ctx, NL), d.derivingPos);
+    }
+
     const usedHere = this.toks.some((t, k) => t.text === d.name && this.text(k + 1) === "." && this.text(k - 1) !== ".");
-    if (!exported && !usedHere && !d.ctors.some(clashes)) return m;
+    if (!exported && !usedHere && !d.ctors.some(clashes) && derived.length === 0) return m;
     const sameName = d.ctors.find((c) => c.name === d.name && !clashes(c));
     if (!sameName) {
       m.gen(`${NL}${ex}const ${d.name} = {`, d.pos);
@@ -386,6 +426,7 @@ class Transpiler {
           m.gen(`${NL}  ${c.name},`, c.pos);
         }
       }
+      for (const x of derived) m.gen(`${NL}  ${x.member}: ${x.fn},`, d.derivingPos);
       m.gen(`${NL}} as const;`, d.pos);
     } else if (sameName.fields.length > 0) {
       // data Point = Point(x: number, y: number): the value Point is already
@@ -396,6 +437,13 @@ class Transpiler {
         else m.gen(c.name, c.pos);
         m.gen(";", c.pos);
       }
+      for (const x of derived) m.gen(`${NL}${d.name}.${x.member} = ${x.fn};`, d.derivingPos);
+    } else if (derived.length > 0) {
+      this.report(
+        "error",
+        `${d.name}.${derived[0].member} has nowhere to go: the name ${d.name} is already the value of its constructor ${d.name}. Rename the type or the constructor.`,
+        d.derivingPos,
+      );
     }
     // (data Unit = Unit: the value Unit is the constant itself; no namespace.)
     return m;

@@ -12,3 +12,4 @@ Some(5) None
 1 * x + --(2 + 0) => x + 2
 Some(42) None
 0 5 11
+false true 1 Cons(Some(1), Cons(Some(2), Cons(Some(3), Nil)))
