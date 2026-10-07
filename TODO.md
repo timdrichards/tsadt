@@ -17,10 +17,10 @@ priority order.
 - [x] `--tsconfig` for compiler options
 - [x] Type errors reported at `.tsa` line and column
 - [x] Match on several values at once: `match (a, b) { (Some(x), Some(y)) => ... }`
+- [x] Or-patterns: `Circle(_) | Rect(_, _) => ...`, anywhere in a pattern, with the same variables bound in every alternative
 
 ## Next up
 
-- [ ] Or-patterns: `Circle(_) | Rect(_, _) => ...`, with the same variables bound in every alternative
 - [ ] Named-field patterns: `Rect { width, height: h }`
 
 ## Patterns

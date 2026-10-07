@@ -19,9 +19,9 @@ data Expr =
 
 function simplify(e: Expr): Expr {
   return match (e) {
-    Add(Num(0), x) => simplify(x),
-    Mul(Num(1), x) => simplify(x),
-    Mul(Num(0), _) => Num(0),
+    Add(Num(0), x) | Add(x, Num(0)) => simplify(x),
+    Mul(Num(1), x) | Mul(x, Num(1)) => simplify(x),
+    Mul(Num(0), _) | Mul(_, Num(0)) => Num(0),
     Add(a, b) => Add(simplify(a), simplify(b)),
     Mul(a, b) => Mul(simplify(a), simplify(b)),
     leaf => leaf,
@@ -42,7 +42,8 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
   constraints and defaults. Values are immutable, and nullary constructors
   like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
-  wildcards, `x @ pattern` bindings, `if` guards and block bodies. Match
+  wildcards, or-patterns, `x @ pattern` bindings, `if` guards and block
+  bodies. Match
   several values at once with `match (a, b) { (p, q) => ... }`. A `match` is
   an expression, so it nests and composes.
 - **Exhaustiveness and redundancy checking** using Maranget's usefulness
@@ -117,7 +118,7 @@ by your usual toolchain.
 ### Data types
 
 ```ts
-data Shape = Circle(radius: number) | Rect(width: number, height: number) | Empty;
+data Shape = Circle(radius: number) | Square(side: number) | Rect(width: number, height: number) | Empty;
 export data Option<T> = None | Some(value: T);
 export data List<T> = Nil | Cons(head: T, tail: List<T>);
 data Pair = Pair(number, string);     // positional fields are named _0, _1
@@ -146,11 +147,34 @@ match (value) {
 | `0`, `-1`, `"hi"`                    | a number or string literal                  |
 | `true`, `false`, `null`, `undefined` | that value                                  |
 | `t @ Cons(_, _)`                     | what the inner pattern matches, also binding `t` |
+| `p \| q`                            | anything `p` or `q` matches; both must bind the same variables |
 | `(p, q)`                             | with `match (a, b)`: `a` against `p` and `b` against `q` |
 
 Arms are tried in order. A guard can use the pattern's variables, and a
 guarded arm never counts toward exhaustiveness. Booleans and `data` types
 are finite; numbers and strings need a catch-all arm.
+
+Or-patterns let one arm handle several shapes. They can appear anywhere in a
+pattern, and every alternative must bind the same variables, so the body
+can use them whichever alternative matched:
+
+```ts
+const corners = (s: Shape) => match (s) {
+  Circle(_) | Empty => 0,
+  Square(_) | Rect(_, _) => 4,
+};
+
+const size = (s: Shape) => match (s) {
+  Circle(n) | Square(n) => n,     // n comes from a different field in each
+  Rect(w, _) => w,
+  Empty => 0,
+};
+
+const weekend = (day: string) => match (day) { "Sat" | "Sun" => true, _ => false };
+```
+
+`|` binds more loosely than anything else in a pattern, so write
+`x @ (A | B)` to name the value matched by either alternative.
 
 To match several values at once, list them in the `match` and give each arm
 one pattern per value, in parentheses. `_` on its own matches everything:
@@ -266,8 +290,7 @@ There is also a library API in `dist/index.js`: `transpile`,
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for the full list. Next up: or-patterns and named-field
-patterns.
+See [TODO.md](TODO.md) for the full list. Next up: named-field patterns.
 
 ## Development
 

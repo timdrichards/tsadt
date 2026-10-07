@@ -4,7 +4,7 @@
 import { checkMatch } from "./exhaustive.js";
 import { Token, TsadtError, tokenize } from "./lexer.js";
 import { Mapped } from "./mapped.js";
-import { CtorInfo, DataDecl, Pattern, Registry, showPattern } from "./registry.js";
+import { boundNames, CtorInfo, DataDecl, Pattern, Registry, showPattern } from "./registry.js";
 
 export interface Diagnostic {
   severity: "error" | "warning";
@@ -44,8 +44,8 @@ const OPEN: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
 const CLOSE = new Set([")", "]", "}"]);
 
 interface Arm {
-  /** One pattern per matched value. */
-  pats: Pattern[];
+  /** Top-level alternatives, each with one pattern per matched value. */
+  rows: Pattern[][];
   guard: Mapped | null;
   guardPos: number;
   body: Mapped;
@@ -350,10 +350,32 @@ class Transpiler {
 
   // ---------------------------------------------------------------- match
 
+  /** pattern := primary ('|' primary)*  -- `|` binds loosest. */
   private parsePattern(j: number): { pat: Pattern; next: number } {
+    const first = this.parsePrimaryPattern(j);
+    if (this.text(first.next) !== "|") return first;
+    const alts = [first.pat];
+    let k = first.next;
+    while (this.text(k) === "|") {
+      const r = this.parsePrimaryPattern(k + 1);
+      alts.push(r.pat);
+      k = r.next;
+    }
+    return { pat: { k: "or", alts, pos: first.pat.pos }, next: k };
+  }
+
+  private parsePrimaryPattern(j: number): { pat: Pattern; next: number } {
     const t = this.toks[j];
     if (!t) throw new TsadtError("Expected a pattern but found end of file", this.src.length);
     const pos = t.start;
+    if (t.text === "(") {
+      const r = this.parsePattern(j + 1);
+      if (this.text(r.next) === ",") {
+        throw new TsadtError("A pattern with commas, like (a, b), needs a match on several values: match (x, y) { ... }", pos);
+      }
+      this.expect(r.next, ")", `')' to close the pattern`);
+      return { pat: r.pat, next: r.next + 1 };
+    }
     if (t.text === "_") return { pat: { k: "wild", pos }, next: j + 1 };
     if (t.kind === "num" || t.kind === "str" || (t.kind === "ident" && LITERAL_IDENTS.has(t.text))) {
       return { pat: { k: "lit", text: t.text, pos }, next: j + 1 };
@@ -381,18 +403,36 @@ class Transpiler {
       return { pat: { k: "ctor", name: t.text, args, pos }, next: k };
     }
     if (this.text(j + 1) === "@") {
-      const r = this.parsePattern(j + 2);
+      // `x @ A | B` means `(x @ A) | B`, as in Rust; write `x @ (A | B)`.
+      const r = this.parsePrimaryPattern(j + 2);
       return { pat: { k: "bind", name: t.text, sub: r.pat, pos }, next: r.next };
     }
     return { pat: { k: "bind", name: t.text, sub: null, pos }, next: j + 1 };
   }
 
   /**
-   * Parses the patterns of one arm. With several matched values that is a
-   * parenthesized tuple `(p1, ..., pn)`, or `_` for "anything". With one value
-   * a parenthesized pattern `(p)` is just grouping.
+   * Parses the patterns of one arm into its top-level alternatives, each with
+   * one pattern per matched value. With several values each alternative is a
+   * parenthesized tuple `(p1, ..., pn)` or `_`, and alternatives are joined by
+   * `|`. With one value, `A | B` is two alternatives.
    */
-  private parseArmPatterns(j: number, width: number): { pats: Pattern[]; next: number } {
+  private parseArmPatterns(j: number, width: number): { rows: Pattern[][]; next: number } {
+    if (width === 1) {
+      const { pat, next } = this.parsePattern(j);
+      return { rows: pat.k === "or" ? pat.alts.map((a) => [a]) : [[pat]], next };
+    }
+    const rows: Pattern[][] = [];
+    let k = j;
+    for (;;) {
+      const r = this.parseTupleRow(k, width);
+      rows.push(r.pats);
+      k = r.next;
+      if (this.text(k) !== "|") return { rows, next: k };
+      k++;
+    }
+  }
+
+  private parseTupleRow(j: number, width: number): { pats: Pattern[]; next: number } {
     if (this.text(j) === "(") {
       const close = this.matching(j);
       const pats: Pattern[] = [];
@@ -405,18 +445,44 @@ class Transpiler {
         else if (k !== close) throw new TsadtError(`Expected ',' or ')' in pattern but found ${this.describe(k)}`, this.posOf(k));
       }
       if (pats.length !== width) {
-        const what = width === 1 ? "one value" : `${width} values`;
-        throw new TsadtError(`This match is on ${what}, but the pattern has ${pats.length}`, this.posOf(j));
+        throw new TsadtError(`This match is on ${width} values, but the pattern has ${pats.length}`, this.posOf(j));
       }
       return { pats, next: close + 1 };
     }
-    const { pat, next } = this.parsePattern(j);
-    if (width === 1) return { pats: [pat], next };
+    const { pat, next } = this.parsePrimaryPattern(j);
     if (pat.k === "wild") return { pats: Array.from({ length: width }, () => pat), next };
     throw new TsadtError(
       `This match is on ${width} values, so each arm needs ${width} patterns in parentheses, like (${Array(width).fill("_").join(", ")}), or _ for anything`,
       pat.pos,
     );
+  }
+
+  /** Checks a set of alternatives: each is valid, and all bind the same variables. */
+  private validateAlternatives(alts: Pattern[][], names: Set<string>): void {
+    let first: string[] | null = null;
+    let firstShown = "";
+    for (const row of alts) {
+      const mine = new Set(names);
+      for (const p of row) this.validate(p, mine);
+      const added = [...mine].filter((n) => !names.has(n)).sort();
+      const shown = showRow(row);
+      if (first === null) {
+        first = added;
+        firstShown = shown;
+        continue;
+      }
+      const missing = first.find((n) => !added.includes(n));
+      const extra = added.find((n) => !first!.includes(n));
+      const v = missing ?? extra;
+      if (v !== undefined) {
+        const [has, lacks] = missing !== undefined ? [firstShown, shown] : [shown, firstShown];
+        throw new TsadtError(
+          `Every alternative of an or-pattern must bind the same variables: '${v}' is bound in '${has}' but not in '${lacks}'`,
+          row[0].pos,
+        );
+      }
+    }
+    for (const n of first ?? []) names.add(n);
   }
 
   private validate(p: Pattern, names: Set<string>): void {
@@ -435,6 +501,9 @@ class Transpiler {
         for (const a of p.args) this.validate(a, names);
         return;
       }
+      case "or":
+        this.validateAlternatives(p.alts.map((a) => [a]), names);
+        return;
       default:
         return;
     }
@@ -468,9 +537,8 @@ class Transpiler {
     let j = bOpen + 1;
     while (j < bClose) {
       const armStart = j;
-      const { pats, next } = this.parseArmPatterns(j, width);
-      const names = new Set<string>();
-      for (const p of pats) this.validate(p, names);
+      const { rows, next } = this.parseArmPatterns(j, width);
+      this.validateAlternatives(rows, new Set());
       j = next;
 
       let guard: Mapped | null = null;
@@ -482,7 +550,7 @@ class Transpiler {
         guardPos = this.posOf(j + 1);
         j = g;
       }
-      this.expect(j, "=>", `'=>' after pattern ${showArm(pats)}`);
+      this.expect(j, "=>", `'=>' after pattern ${showArm(rows)}`);
       j++;
 
       let body: Mapped;
@@ -502,13 +570,20 @@ class Transpiler {
       for (let k = armStart; k < j; k++) if (this.text(k) === "await") usesAwait = true;
       if (this.text(j) === ",") j++;
       else if (j < bClose && !block) throw new TsadtError(`Expected ',' between match arms but found ${this.describe(j)}`, this.posOf(j));
-      arms.push({ pats, guard, guardPos, body, bodyPos, block, pos: this.posOf(armStart) });
+      arms.push({ rows, guard, guardPos, body, bodyPos, block, pos: this.posOf(armStart) });
     }
     if (arms.length === 0) throw new TsadtError("match has no arms", matchPos);
 
-    const check = checkMatch(arms.map((a) => ({ pats: a.pats, guarded: a.guard !== null })), this.reg);
+    const check = checkMatch(arms.map((a) => ({ rows: a.rows, guarded: a.guard !== null })), this.reg);
     for (const k of check.redundant) {
-      this.report("warning", `Unreachable match arm '${showArm(arms[k].pats)}' (removed from output)`, arms[k].pos);
+      this.report("warning", `Unreachable match arm '${showArm(arms[k].rows)}' (removed from output)`, arms[k].pos);
+    }
+    // Drop unreachable alternatives too: TypeScript would reject the test
+    // for an already-excluded case as a comparison with no overlap.
+    for (const { arm, alt } of [...check.redundantAlts].reverse()) {
+      const row = arms[arm].rows[alt];
+      this.report("warning", `Unreachable alternative '${showRow(row)}' in or-pattern (removed from output)`, row[0].pos);
+      arms[arm].rows.splice(alt, 1);
     }
     if (check.missing !== null) {
       this.report("error", `Non-exhaustive match: no arm covers ${check.missing}`, matchPos);
@@ -550,7 +625,44 @@ class Transpiler {
         p.args.forEach((a, k) => this.compilePattern(a, `${path}.${info.fields[k]}`, conds, binds));
         return;
       }
+      case "or": {
+        // Only or-patterns that bind nothing get here (see expandRow), so
+        // they compile to a single disjunction.
+        const alts = p.alts.map((a) => {
+          const c: Array<[string, number]> = [];
+          this.compilePattern(a, path, c, []);
+          return c.map(([t]) => t);
+        });
+        if (alts.some((c) => c.length === 0)) return; // an alternative matches anything
+        conds.push([`(${alts.map((c) => (c.length > 1 ? `(${c.join(" && ")})` : c[0])).join(" || ")})`, p.pos]);
+        return;
+      }
     }
+  }
+
+  /**
+   * Splits a row into or-free variants wherever an or-pattern binds
+   * variables, since each variant then binds them from different places.
+   * Or-patterns that bind nothing stay and compile to `||`.
+   */
+  private expandRow(row: Pattern[]): Pattern[][] {
+    const expand = (p: Pattern): Pattern[] => {
+      switch (p.k) {
+        case "bind":
+          return p.sub ? expand(p.sub).map((s) => ({ ...p, sub: s })) : [p];
+        case "ctor":
+          return product(p.args.map(expand)).map((args) => ({ ...p, args }));
+        case "or":
+          return boundNames(p).length > 0 ? p.alts.flatMap(expand) : [p];
+        default:
+          return [p];
+      }
+    };
+    const variants = product(row.map(expand));
+    if (variants.length > 64) {
+      throw new TsadtError(`This or-pattern expands to ${variants.length} cases; split it into several arms`, row[0].pos);
+    }
+    return variants;
   }
 
   private genMatch(arms: Arm[], width: number, scrutinee: Mapped, isAsync: boolean, pos: number): Mapped {
@@ -562,29 +674,48 @@ class Transpiler {
     const asyncKw = isAsync ? "async " : "";
     m.gen(`${isAsync ? "(await " : ""}(${asyncKw}(${vars.join(", ")}) => {`, pos);
     let irrefutable = false;
-    for (const arm of arms) {
-      const conds: Array<[string, number]> = [];
-      const binds: Array<[string, number]> = [];
-      arm.pats.forEach((p, k) => this.compilePattern(p, vars[k], conds, binds));
-      const wrapped = conds.length > 0 || arm.guard !== null;
-      const indent = wrapped ? "    " : "  ";
-      if (conds.length > 0) {
-        m.gen(`${NL}  if (`, arm.pos);
-        conds.forEach(([c, at], k) => m.gen((k ? " && " : "") + c, at));
-        m.gen(") {", arm.pos);
-      } else if (arm.guard !== null) {
-        m.gen(`${NL}  {`, arm.pos);
-      }
-      for (const [b, at] of binds) m.gen(NL + indent + b, at);
-      m.gen(NL + indent, arm.pos);
-      if (arm.guard !== null) m.gen("if (", arm.guardPos).add(arm.guard).gen(") ", arm.guardPos);
-      if (arm.block) m.gen(`return (${asyncKw}() => {`, arm.bodyPos).add(arm.body).gen("})();", arm.bodyPos);
-      else m.gen("return ", arm.bodyPos).add(arm.body).gen(";", arm.bodyPos);
-      if (wrapped) {
-        m.gen(`${NL}  }`, arm.pos);
-      } else {
-        irrefutable = true;
-        break;
+    arms: for (const arm of arms) {
+      const variants = arm.rows.flatMap((r) => this.expandRow(r));
+      const compiled = variants.map((row) => {
+        const conds: Array<[string, number]> = [];
+        const binds: Array<[string, number]> = [];
+        row.forEach((p, k) => this.compilePattern(p, vars[k], conds, binds));
+        return { conds, binds };
+      });
+      // Alternatives that bind nothing share one test: if (a || b). Otherwise
+      // each gets its own block, so TypeScript narrows each one separately.
+      const groups =
+        compiled.length > 1 && compiled.every((c) => c.binds.length === 0)
+          ? [{ disjuncts: compiled.map((c) => c.conds), binds: [] as Array<[string, number]> }]
+          : compiled.map((c) => ({ disjuncts: [c.conds], binds: c.binds }));
+      for (const g of groups) {
+        const always = g.disjuncts.some((d) => d.length === 0);
+        const wrapped = !always || arm.guard !== null;
+        const indent = wrapped ? "    " : "  ";
+        if (!always) {
+          m.gen(`${NL}  if (`, arm.pos);
+          g.disjuncts.forEach((d, k) => {
+            if (k) m.gen(" || ", arm.pos);
+            const paren = g.disjuncts.length > 1 && d.length > 1;
+            if (paren) m.gen("(", arm.pos);
+            d.forEach(([c, at], n) => m.gen((n ? " && " : "") + c, at));
+            if (paren) m.gen(")", arm.pos);
+          });
+          m.gen(") {", arm.pos);
+        } else if (arm.guard !== null) {
+          m.gen(`${NL}  {`, arm.pos);
+        }
+        for (const [b, at] of g.binds) m.gen(NL + indent + b, at);
+        m.gen(NL + indent, arm.pos);
+        if (arm.guard !== null) m.gen("if (", arm.guardPos).add(arm.guard).gen(") ", arm.guardPos);
+        if (arm.block) m.gen(`return (${asyncKw}() => {`, arm.bodyPos).add(arm.body).gen("})();", arm.bodyPos);
+        else m.gen("return ", arm.bodyPos).add(arm.body).gen(";", arm.bodyPos);
+        if (wrapped) {
+          m.gen(`${NL}  }`, arm.pos);
+        } else {
+          irrefutable = true;
+          break arms;
+        }
       }
     }
     if (!irrefutable) {
@@ -596,8 +727,17 @@ class Transpiler {
   }
 }
 
-function showArm(pats: Pattern[]): string {
+function showRow(pats: Pattern[]): string {
   return pats.length === 1 ? showPattern(pats[0]) : `(${pats.map(showPattern).join(", ")})`;
+}
+
+function showArm(rows: Pattern[][]): string {
+  return rows.map(showRow).join(" | ");
+}
+
+/** Cartesian product: [[a, b], [c]] -> [[a, c], [b, c]]. */
+function product<T>(lists: T[][]): T[][] {
+  return lists.reduce<T[][]>((acc, list) => acc.flatMap((xs) => list.map((x) => [...xs, x])), [[]]);
 }
 
 function register(reg: Registry, d: DataDecl, error: (msg: string) => void): void {

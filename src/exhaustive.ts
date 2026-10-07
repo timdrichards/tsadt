@@ -8,10 +8,14 @@
 // The witness variant also returns an example value that no arm covers.
 //
 // Guarded arms never count as covering anything, since the guard may fail.
+//
+// Or-patterns follow the paper too: a row whose first pattern is
+// (p1 | p2) stands for two rows, one per alternative, and a vector whose
+// first pattern is an or-pattern is useful if any alternative is.
 
 import { Pattern, Registry } from "./registry.js";
 
-type P = { k: "wild" } | { k: "con"; key: string; display: string; args: P[] };
+type P = { k: "wild" } | { k: "con"; key: string; display: string; args: P[] } | { k: "or"; alts: P[] };
 type Row = P[];
 
 const WILD: P = { k: "wild" };
@@ -45,7 +49,23 @@ export function normalize(p: Pattern): P {
       return { k: "con", key: "l:" + canonLit(p.text), display: p.text, args: [] };
     case "ctor":
       return { k: "con", key: "c:" + p.name, display: p.name, args: p.args.map(normalize) };
+    case "or": {
+      const alts = p.alts.map(normalize);
+      return alts.some((a) => a.k === "wild") ? WILD : { k: "or", alts };
+    }
   }
+}
+
+/** Replaces each row whose first pattern is an or-pattern by one row per alternative. */
+function expandHeads(rows: Row[]): Row[] {
+  const out: Row[] = [];
+  const push = (r: Row) => {
+    const h = r[0];
+    if (h.k === "or") for (const a of h.alts) push([a, ...r.slice(1)]);
+    else out.push(r);
+  };
+  for (const r of rows) push(r);
+  return out;
 }
 
 class Checker {
@@ -54,6 +74,7 @@ class Checker {
   private heads(rows: Row[]): string[] {
     const keys = new Set<string>();
     for (const r of rows) if (r[0].k === "con") keys.add(r[0].key);
+    // (rows are expanded before this is called, so no head is an or-pattern)
     return [...keys];
   }
 
@@ -80,7 +101,7 @@ class Checker {
     for (const r of rows) {
       const h = r[0];
       if (h.k === "wild") out.push([...wilds(arity), ...r.slice(1)]);
-      else if (h.key === key) out.push([...h.args, ...r.slice(1)]);
+      else if (h.k === "con" && h.key === key) out.push([...h.args, ...r.slice(1)]);
     }
     return out;
   }
@@ -91,7 +112,9 @@ class Checker {
 
   useful(rows: Row[], q: P[]): boolean {
     if (q.length === 0) return rows.length === 0;
+    rows = expandHeads(rows);
     const [h, ...rest] = q;
+    if (h.k === "or") return h.alts.some((a) => this.useful(rows, [a, ...rest]));
     if (h.k === "con") {
       return this.useful(this.specialize(rows, h.key, h.args.length), [...h.args, ...rest]);
     }
@@ -106,6 +129,7 @@ class Checker {
   /** A vector of n patterns matched by no row of `rows`, or null. */
   witness(rows: Row[], n: number): string[] | null {
     if (n === 0) return rows.length === 0 ? [] : null;
+    rows = expandHeads(rows);
     const keys = this.heads(rows);
     const sig = this.signature(keys);
     if (sig && keys.length > 0 && sig.every((m) => keys.includes(m.key))) {
@@ -128,14 +152,19 @@ function render(m: Member, args: string[]): string {
 }
 
 export interface ArmInfo {
-  /** One pattern per matched value. */
-  pats: Pattern[];
+  /**
+   * The arm's top-level alternatives, each with one pattern per matched value.
+   * `A | B => ...` on one value is [[A], [B]].
+   */
+  rows: Pattern[][];
   guarded: boolean;
 }
 
 export interface CheckResult {
   /** Indices of arms that can never be reached. */
   redundant: number[];
+  /** Top-level alternatives that can never be reached, in arms that otherwise can. */
+  redundantAlts: Array<{ arm: number; alt: number }>;
   /**
    * An example value no arm covers (shown as a tuple when matching several
    * values), or null if the match is exhaustive.
@@ -145,14 +174,24 @@ export interface CheckResult {
 
 export function checkMatch(arms: ArmInfo[], reg: Registry): CheckResult {
   const c = new Checker(reg);
-  const width = arms[0]?.pats.length ?? 1;
+  const width = arms[0]?.rows[0]?.length ?? 1;
   const covering: Row[] = [];
   const redundant: number[] = [];
+  const redundantAlts: Array<{ arm: number; alt: number }> = [];
   arms.forEach((arm, i) => {
-    const row = arm.pats.map(normalize);
-    if (!c.useful(covering, row)) redundant.push(i);
-    else if (!arm.guarded) covering.push(row);
+    // Each alternative is checked against earlier arms and earlier
+    // alternatives of this arm, so `A | A` reports the second A.
+    const seen = [...covering];
+    const dead: number[] = [];
+    arm.rows.forEach((pats, k) => {
+      const row = pats.map(normalize);
+      if (!c.useful(seen, row)) dead.push(k);
+      seen.push(row);
+    });
+    if (dead.length === arm.rows.length) redundant.push(i);
+    else for (const k of dead) redundantAlts.push({ arm: i, alt: k });
+    if (!arm.guarded) for (const pats of arm.rows) covering.push(pats.map(normalize));
   });
   const w = c.witness(covering, width);
-  return { redundant, missing: w ? (width === 1 ? w[0] : `(${w.join(", ")})`) : null };
+  return { redundant, redundantAlts, missing: w ? (width === 1 ? w[0] : `(${w.join(", ")})`) : null };
 }

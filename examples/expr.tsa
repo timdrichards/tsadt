@@ -35,12 +35,9 @@ function both(a: Option<number>, b: Option<number>, f: (x: number, y: number) =>
 // Arm order matters: specific rewrites first, structural recursion after.
 export function simplify(e: Expr): Expr {
   return match (e) {
-    Add(Num(0), x) => simplify(x),
-    Add(x, Num(0)) => simplify(x),
-    Mul(Num(1), x) => simplify(x),
-    Mul(x, Num(1)) => simplify(x),
-    Mul(Num(0), _) => Num(0),
-    Mul(_, Num(0)) => Num(0),
+    Add(Num(0), x) | Add(x, Num(0)) => simplify(x),
+    Mul(Num(1), x) | Mul(x, Num(1)) => simplify(x),
+    Mul(Num(0), _) | Mul(_, Num(0)) => Num(0),
     Add(Num(a), Num(b)) => Num(a + b),
     Neg(Neg(x)) => simplify(x),
     Add(a, b) => Add(simplify(a), simplify(b)),

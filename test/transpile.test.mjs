@@ -402,3 +402,69 @@ test("one value: parentheses group; double parentheses keep a comma expression",
     console.log(g(Some(2)), g(None), h, calls);`);
   assert.equal(out, "2 0 4 1\n");
 });
+
+// ------------------------------------------------------------- or-patterns
+
+const SHAPE = `export data Shape = Circle(r: number) | Square(side: number) | Rect(w: number, h: number) | Dot;\n`;
+
+test("or-patterns: top-level, nested, with bindings, and across several values", () => {
+  const out = run(SHAPE + LIST + `
+    const corners = (s: Shape) => match (s) { Circle(_) | Dot => 0, Square(_) | Rect(_, _) => 4 };
+    const size = (s: Shape) => match (s) { Circle(n) | Square(n) => n, Rect(w, _) => w, Dot => 0 };
+    const weekend = (d: string) => match (d) { "Sat" | "Sun" => true, _ => false };
+    const sameKind = (a: Shape, b: Shape) => match (a, b) {
+      (Circle(_), Circle(_)) | (Dot, Dot) => true,
+      (Square(_) | Rect(_, _), Square(_) | Rect(_, _)) => true,
+      _ => false,
+    };
+    // nested or-pattern that binds: expands into one test per alternative
+    const firstSize = (xs: List<Shape>) => match (xs) {
+      Cons(Circle(n) | Square(n), _) => n,
+      Cons(x @ (Rect(_, _) | Dot), _) => corners(x),
+      Nil => -1,
+    };
+    console.log(corners(Circle(1)), corners(Rect(1, 2)), size(Square(3)), size(Circle(5)), weekend("Sun"), weekend("Mon"));
+    console.log(sameKind(Square(1), Rect(1, 2)), sameKind(Dot, Dot), sameKind(Dot, Circle(1)));
+    console.log(firstSize(Cons(Square(7), Nil)), firstSize(Cons(Dot, Nil)), firstSize(Cons(Rect(1, 1), Nil)), firstSize(Nil));`);
+  assert.equal(out, "0 4 3 5 true false\ntrue true false\n7 0 4 -1\n");
+});
+
+test("or-patterns that bind nothing compile to one test", () => {
+  const { code } = ok(SHAPE + `const f = (s: Shape) => match (s) { Circle(_) | Dot => 0, _ => 1 };`);
+  assert.match(code, /if \(__m0\.tag === "Circle" \|\| __m0\.tag === "Dot"\)/);
+});
+
+test("exhaustiveness sees through or-patterns", () => {
+  assert.deepEqual(errorsOf(SHAPE + `const f = (s: Shape) => match (s) { Circle(_) | Dot => 0, Square(_) => 4 };`), [
+    "Non-exhaustive match: no arm covers Rect(_, _)",
+  ]);
+  assert.deepEqual(errorsOf(SHAPE + `const f = (s: Shape) => match (s) { Circle(_) | Dot | Square(_) | Rect(_, _) => 0 };`), []);
+  assert.deepEqual(errorsOf(`const f = (b: boolean) => match (b) { true | false => 1 };`), []);
+  assert.deepEqual(errorsOf(LIST + `const f = (xs: List<boolean>) => match (xs) { Nil => 0, Cons(true | false, Nil) => 1 };`), [
+    "Non-exhaustive match: no arm covers Cons(true, Cons(_, _))",
+  ]);
+});
+
+test("unreachable alternatives are reported and removed", () => {
+  const r = transpile(SHAPE + `const f = (s: Shape) => match (s) {
+    Circle(_) | Dot => 0, Dot | Square(_) => 1, Circle(_) | Dot => 2, _ => 3 };`, "t.tsa");
+  assert.deepEqual(r.diagnostics.map((d) => d.message), [
+    "Unreachable match arm 'Circle(_) | Dot' (removed from output)",
+    "Unreachable alternative 'Dot' in or-pattern (removed from output)",
+  ]);
+  assert.match(r.code, /if \(__m0\.tag === "Square"\) \{\n\s+return 1;/);
+  run(SHAPE + `const f = (s: Shape) => match (s) { Circle(_) | Dot => 0, Dot | Square(_) => 1, _ => 3 }; console.log(f(Dot));`);
+});
+
+test("every alternative must bind the same variables", () => {
+  assert.deepEqual(errorsOf(SHAPE + `const f = (s: Shape) => match (s) { Circle(n) | Square(m) => 0, _ => 1 };`), [
+    "Every alternative of an or-pattern must bind the same variables: 'n' is bound in 'Circle(n)' but not in 'Square(m)'",
+  ]);
+  assert.deepEqual(errorsOf(SHAPE + `const f = (s: Shape) => match (s) { Circle(_) | Square(m) => 0, _ => 1 };`), [
+    "Every alternative of an or-pattern must bind the same variables: 'm' is bound in 'Square(m)' but not in 'Circle(_)'",
+  ]);
+  // `x @ A | B` is `(x @ A) | B`, as in Rust
+  assert.deepEqual(errorsOf(SHAPE + `const f = (s: Shape) => match (s) { x @ Circle(_) | Dot => 0, _ => 1 };`), [
+    "Every alternative of an or-pattern must bind the same variables: 'x' is bound in 'x @ Circle(_)' but not in 'Dot'",
+  ]);
+});

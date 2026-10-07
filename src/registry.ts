@@ -37,17 +37,38 @@ export type Pattern =
   | { k: "wild"; pos: number }
   | { k: "bind"; name: string; sub: Pattern | null; pos: number }
   | { k: "lit"; text: string; pos: number }
-  | { k: "ctor"; name: string; args: Pattern[]; pos: number };
+  | { k: "ctor"; name: string; args: Pattern[]; pos: number }
+  | { k: "or"; alts: Pattern[]; pos: number };
 
 export function showPattern(p: Pattern): string {
   switch (p.k) {
     case "wild":
       return "_";
     case "bind":
-      return p.sub ? `${p.name} @ ${showPattern(p.sub)}` : p.name;
+      if (!p.sub) return p.name;
+      return p.sub.k === "or" ? `${p.name} @ (${showPattern(p.sub)})` : `${p.name} @ ${showPattern(p.sub)}`;
     case "lit":
       return p.text;
     case "ctor":
       return p.args.length ? `${p.name}(${p.args.map(showPattern).join(", ")})` : p.name;
+    case "or":
+      return p.alts.map(showPattern).join(" | ");
   }
+}
+
+/** Variables bound anywhere in p. */
+export function boundNames(p: Pattern, out: string[] = []): string[] {
+  switch (p.k) {
+    case "bind":
+      out.push(p.name);
+      if (p.sub) boundNames(p.sub, out);
+      break;
+    case "ctor":
+      for (const a of p.args) boundNames(a, out);
+      break;
+    case "or":
+      boundNames(p.alts[0], out); // all alternatives bind the same names
+      break;
+  }
+  return out;
 }
