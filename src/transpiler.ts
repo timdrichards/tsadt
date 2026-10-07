@@ -387,6 +387,7 @@ class Transpiler {
     if (t.kind !== "ident") throw new TsadtError(`Expected a pattern but found '${t.text}'`, pos);
 
     if (/^[A-Z]/.test(t.text)) {
+      if (this.text(j + 1) === "{") return this.parseFieldPattern(j);
       const args: Pattern[] = [];
       let k = j + 1;
       if (this.text(k) === "(") {
@@ -408,6 +409,49 @@ class Transpiler {
       return { pat: { k: "bind", name: t.text, sub: r.pat, pos }, next: r.next };
     }
     return { pat: { k: "bind", name: t.text, sub: null, pos }, next: j + 1 };
+  }
+
+  /**
+   * Named-field pattern: `Rect { width, height: h, .. }`. A bare field name
+   * binds a variable of that name; `field: pattern` matches the field against
+   * a pattern; fields left out match anything (`..` may be written to say so).
+   * Desugared here into the positional form `Rect(width, h)`, so checking and
+   * code generation need nothing new.
+   */
+  private parseFieldPattern(j: number): { pat: Pattern; next: number } {
+    const t = this.toks[j];
+    const info = this.reg.ctors.get(t.text);
+    if (!info) throw new TsadtError(`Unknown constructor '${t.text}'. Is its data declaration in one of the input files?`, t.start);
+    const close = this.matching(j + 1);
+    const given = new Map<string, Pattern>();
+    let k = j + 2;
+    while (k < close) {
+      if (this.text(k) === "...") {
+        k++;
+      } else if (this.text(k) === "." && this.text(k + 1) === ".") {
+        k += 2;
+      } else {
+        const f = this.toks[k];
+        if (f.kind !== "ident") throw new TsadtError(`Expected a field name but found '${f.text}'`, f.start);
+        if (!info.fields.includes(f.text)) {
+          const list = info.fields.length ? info.fields.join(", ") : "none";
+          throw new TsadtError(`${t.text} has no field '${f.text}' (fields: ${list})`, f.start);
+        }
+        if (given.has(f.text)) throw new TsadtError(`Field '${f.text}' appears twice in this pattern`, f.start);
+        if (this.text(k + 1) === ":") {
+          const r = this.parsePattern(k + 2);
+          given.set(f.text, r.pat);
+          k = r.next;
+        } else {
+          given.set(f.text, { k: "bind", name: f.text, sub: null, pos: f.start });
+          k++;
+        }
+      }
+      if (this.text(k) === ",") k++;
+      else if (k !== close) throw new TsadtError(`Expected ',' or '}' in pattern but found ${this.describe(k)}`, this.posOf(k));
+    }
+    const args = info.fields.map((f): Pattern => given.get(f) ?? { k: "wild", pos: t.start });
+    return { pat: { k: "ctor", name: t.text, args, pos: t.start }, next: close + 1 };
   }
 
   /**

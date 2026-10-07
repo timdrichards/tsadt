@@ -42,8 +42,8 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
   constraints and defaults. Values are immutable, and nullary constructors
   like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
-  wildcards, or-patterns, `x @ pattern` bindings, `if` guards and block
-  bodies. Match
+  wildcards, or-patterns, named-field patterns, `x @ pattern` bindings,
+  `if` guards and block bodies. Match
   several values at once with `match (a, b) { (p, q) => ... }`. A `match` is
   an expression, so it nests and composes.
 - **Exhaustiveness and redundancy checking** using Maranget's usefulness
@@ -147,12 +147,29 @@ match (value) {
 | `0`, `-1`, `"hi"`                    | a number or string literal                  |
 | `true`, `false`, `null`, `undefined` | that value                                  |
 | `t @ Cons(_, _)`                     | what the inner pattern matches, also binding `t` |
+| `Rect { width, height: h }`         | a constructor by field name; left-out fields match anything |
 | `p \| q`                            | anything `p` or `q` matches; both must bind the same variables |
 | `(p, q)`                             | with `match (a, b)`: `a` against `p` and `b` against `q` |
 
 Arms are tried in order. A guard can use the pattern's variables, and a
 guarded arm never counts toward exhaustiveness. Booleans and `data` types
 are finite; numbers and strings need a catch-all arm.
+
+Fields can also be matched by name, which keeps patterns readable for
+constructors with many fields and robust when fields are reordered. A bare
+field name binds a variable of the same name, `field: pattern` matches the
+field against any pattern, and fields you leave out match anything (write
+`..` if you want to say so explicitly):
+
+```ts
+const describe = (s: Shape) => match (s) {
+  Rect { width: 0 } | Rect { height: 0 } => "flat",
+  Rect { width, height } if width === height => `square ${width}`,
+  Rect { height: h, .. } => `rectangle of height ${h}`,
+  Circle { radius } => `circle ${radius}`,
+  _ => "other",
+};
+```
 
 Or-patterns let one arm handle several shapes. They can appear anywhere in a
 pattern, and every alternative must bind the same variables, so the body
@@ -290,7 +307,8 @@ There is also a library API in `dist/index.js`: `transpile`,
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for the full list. Next up: named-field patterns.
+See [TODO.md](TODO.md) for the full list. Next up: qualified constructor
+names (`Shape.Circle`) and `deriving (Eq, Show, Ord)`.
 
 ## Development
 

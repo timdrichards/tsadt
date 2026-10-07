@@ -18,10 +18,12 @@ priority order.
 - [x] Type errors reported at `.tsa` line and column
 - [x] Match on several values at once: `match (a, b) { (Some(x), Some(y)) => ... }`
 - [x] Or-patterns: `Circle(_) | Rect(_, _) => ...`, anywhere in a pattern, with the same variables bound in every alternative
+- [x] Named-field patterns: `Rect { width, height: h }`
 
 ## Next up
 
-- [ ] Named-field patterns: `Rect { width, height: h }`
+- [ ] Qualified constructors (`Shape.Circle`), removing the global uniqueness rule
+- [ ] `deriving (Eq, Show, Ord)`: structural equality, printing, comparison
 
 ## Patterns
 
@@ -33,8 +35,6 @@ priority order.
 
 ## Data declarations
 
-- [ ] Qualified constructors (`Shape.Circle`), removing the global uniqueness rule
-- [ ] `deriving (Eq, Show, Ord)`: structural equality, printing, comparison
 - [ ] A type and a type guard for each variant: `Shape.Circle`, `isCircle(s)`
 - [ ] Enums: all-nullary types compile to string literal unions (`"Red" | "Green"`)
 - [ ] Newtypes: `newtype UserId = UserId(string)` as a zero-cost branded type

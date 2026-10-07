@@ -468,3 +468,41 @@ test("every alternative must bind the same variables", () => {
     "Every alternative of an or-pattern must bind the same variables: 'x' is bound in 'x @ Circle(_)' but not in 'Dot'",
   ]);
 });
+
+// ------------------------------------------------------ named-field patterns
+
+const REC = `export data Shape = Circle(radius: number) | Rect(width: number, height: number) | Dot;\n`;
+
+test("named-field patterns: shorthand, renaming, literals, omitted fields, nesting", () => {
+  const out = run(REC + LIST + `
+    const describe = (s: Shape) => match (s) {
+      Rect { width: 0 } | Rect { height: 0 } => "flat",
+      Rect { width, height } if width === height => "square " + width,
+      Rect { height: h, .. } => "tall " + h,
+      Circle { radius } => "circle " + radius,
+      Dot {} => "dot",
+    };
+    const head = (xs: List<Shape>) => match (xs) { Cons { head: Circle { radius: r } } => r, _ => -1 };
+    console.log([Rect(0, 3), Rect(2, 2), Rect(2, 5), Circle(1), Dot].map(describe).join(", "));
+    console.log(head(Cons(Circle(9), Nil)), head(Cons(Dot, Nil)), head(Nil));`);
+  assert.equal(out, "flat, square 2, tall 5, circle 1, dot\n9 -1 -1\n");
+});
+
+test("named-field patterns work with exhaustiveness checking", () => {
+  assert.deepEqual(errorsOf(REC + `const f = (s: Shape) => match (s) { Circle {} => 0, Rect { width: 0 } => 1, Dot => 2 };`), [
+    "Non-exhaustive match: no arm covers Rect(_, _)",
+  ]);
+  assert.deepEqual(errorsOf(REC + `const f = (s: Shape) => match (s) { Circle { .. } => 0, Rect { } => 1, Dot => 2 };`), []);
+});
+
+test("named-field pattern errors", () => {
+  assert.deepEqual(errorsOf(REC + `const f = (s: Shape) => match (s) { Rect { depth } => 0, _ => 1 };`), [
+    "Rect has no field 'depth' (fields: width, height)",
+  ]);
+  assert.deepEqual(errorsOf(REC + `const f = (s: Shape) => match (s) { Rect { width, width: w } => 0, _ => 1 };`), [
+    "Field 'width' appears twice in this pattern",
+  ]);
+  assert.deepEqual(errorsOf(REC + `const f = (s: Shape) => match (s) { Rect { width: radius, radius } => 0, _ => 1 };`), [
+    "Rect has no field 'radius' (fields: width, height)",
+  ]);
+});
