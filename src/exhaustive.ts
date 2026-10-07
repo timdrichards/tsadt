@@ -39,18 +39,28 @@ function canonLit(text: string): string {
   return text; // true, false, null, undefined
 }
 
-export function normalize(p: Pattern): P {
+/** How to show a constructor in a counterexample: qualified only if the bare name is shared. */
+function ctorDisplay(reg: Registry, type: string, name: string): string {
+  return reg.isShared(name) ? `${type}.${name}` : name;
+}
+
+export function normalize(p: Pattern, reg: Registry): P {
   switch (p.k) {
     case "wild":
       return WILD;
     case "bind":
-      return p.sub ? normalize(p.sub) : WILD;
+      return p.sub ? normalize(p.sub, reg) : WILD;
     case "lit":
       return { k: "con", key: "l:" + canonLit(p.text), display: p.text, args: [] };
     case "ctor":
-      return { k: "con", key: "c:" + p.name, display: p.name, args: p.args.map(normalize) };
+      return {
+        k: "con",
+        key: `c:${p.type}.${p.name}`,
+        display: ctorDisplay(reg, p.type!, p.name),
+        args: p.args.map((a) => normalize(a, reg)),
+      };
     case "or": {
-      const alts = p.alts.map(normalize);
+      const alts = p.alts.map((a) => normalize(a, reg));
       return alts.some((a) => a.k === "wild") ? WILD : { k: "or", alts };
     }
   }
@@ -82,10 +92,14 @@ class Checker {
   private signature(keys: string[]): Member[] | null {
     for (const k of keys) {
       if (!k.startsWith("c:")) continue;
-      const info = this.reg.ctors.get(k.slice(2));
-      if (!info) continue;
-      const decl = this.reg.types.get(info.typeName)!;
-      return decl.ctors.map((c) => ({ key: "c:" + c.name, arity: c.fields.length, display: c.name }));
+      const type = k.slice(2, k.lastIndexOf("."));
+      const decl = this.reg.types.get(type);
+      if (!decl) continue;
+      return decl.ctors.map((c) => ({
+        key: `c:${type}.${c.name}`,
+        arity: c.fields.length,
+        display: ctorDisplay(this.reg, type, c.name),
+      }));
     }
     if (keys.length > 0 && keys.every((k) => k === "l:true" || k === "l:false")) {
       return [
@@ -184,13 +198,13 @@ export function checkMatch(arms: ArmInfo[], reg: Registry): CheckResult {
     const seen = [...covering];
     const dead: number[] = [];
     arm.rows.forEach((pats, k) => {
-      const row = pats.map(normalize);
+      const row = pats.map((p) => normalize(p, reg));
       if (!c.useful(seen, row)) dead.push(k);
       seen.push(row);
     });
     if (dead.length === arm.rows.length) redundant.push(i);
     else for (const k of dead) redundantAlts.push({ arm: i, alt: k });
-    if (!arm.guarded) for (const pats of arm.rows) covering.push(pats.map(normalize));
+    if (!arm.guarded) for (const pats of arm.rows) covering.push(pats.map((p) => normalize(p, reg)));
   });
   const w = c.witness(covering, width);
   return { redundant, redundantAlts, missing: w ? (width === 1 ? w[0] : `(${w.join(", ")})`) : null };

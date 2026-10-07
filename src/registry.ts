@@ -25,19 +25,44 @@ export interface DataDecl {
 }
 
 /**
- * Every `data` declaration across all input files. Constructor names must be
- * globally unique: a pattern like `Cons(h, t)` is resolved by name alone.
+ * Every `data` declaration across all input files. A constructor name is
+ * unique within its type but may be shared by several types; patterns then
+ * qualify it (`Option.None`) or it is resolved from the rest of the match.
  */
 export class Registry {
   readonly types = new Map<string, DataDecl>();
-  readonly ctors = new Map<string, CtorInfo>();
+  /** Constructors by bare name. */
+  readonly ctors = new Map<string, CtorInfo[]>();
+
+  ctor(type: string, name: string): CtorInfo | undefined {
+    return this.types.get(type)?.ctors.find((c) => c.name === name);
+  }
+
+  /** True if more than one data type has a constructor with this name. */
+  isShared(name: string): boolean {
+    return (this.ctors.get(name)?.length ?? 0) > 1;
+  }
+}
+
+/** A constructor pattern: `Cons(h, t)`, `List.Cons(h, t)` or `Cons { head }`. */
+export interface CtorPattern {
+  k: "ctor";
+  name: string;
+  /** The type the user wrote, as in `List.Cons`, or null. */
+  qualifier: string | null;
+  /** The resolved data type; set before checking and code generation. */
+  type: string | null;
+  args: Pattern[];
+  /** Named-field form, until resolution turns it into `args`. */
+  fields: Array<{ name: string; pat: Pattern; pos: number }> | null;
+  pos: number;
 }
 
 export type Pattern =
   | { k: "wild"; pos: number }
   | { k: "bind"; name: string; sub: Pattern | null; pos: number }
   | { k: "lit"; text: string; pos: number }
-  | { k: "ctor"; name: string; args: Pattern[]; pos: number }
+  | CtorPattern
   | { k: "or"; alts: Pattern[]; pos: number };
 
 export function showPattern(p: Pattern): string {
@@ -50,7 +75,11 @@ export function showPattern(p: Pattern): string {
     case "lit":
       return p.text;
     case "ctor":
-      return p.args.length ? `${p.name}(${p.args.map(showPattern).join(", ")})` : p.name;
+    {
+      const name = p.qualifier ? `${p.qualifier}.${p.name}` : p.name;
+      if (p.fields) return `${name} { ${p.fields.map((f) => `${f.name}: ${showPattern(f.pat)}`).join(", ")} }`;
+      return p.args.length ? `${name}(${p.args.map(showPattern).join(", ")})` : name;
+    }
     case "or":
       return p.alts.map(showPattern).join(" | ");
   }
@@ -65,6 +94,7 @@ export function boundNames(p: Pattern, out: string[] = []): string[] {
       break;
     case "ctor":
       for (const a of p.args) boundNames(a, out);
+      for (const f of p.fields ?? []) boundNames(f.pat, out);
       break;
     case "or":
       boundNames(p.alts[0], out); // all alternatives bind the same names

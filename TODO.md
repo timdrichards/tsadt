@@ -19,10 +19,10 @@ priority order.
 - [x] Match on several values at once: `match (a, b) { (Some(x), Some(y)) => ... }`
 - [x] Or-patterns: `Circle(_) | Rect(_, _) => ...`, anywhere in a pattern, with the same variables bound in every alternative
 - [x] Named-field patterns: `Rect { width, height: h }`
+- [x] Qualified constructors (`Shape.Circle`), removing the global uniqueness rule
 
 ## Next up
 
-- [ ] Qualified constructors (`Shape.Circle`), removing the global uniqueness rule
 - [ ] `deriving (Eq, Show, Ord)`: structural equality, printing, comparison
 
 ## Patterns

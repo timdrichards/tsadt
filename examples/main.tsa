@@ -44,6 +44,11 @@ function status(code: number): string {
 // Booleans are a finite type, so these two arms are exhaustive.
 const yesNo = (b: boolean) => match (b) { true => "yes", false => "no" };
 
+// Two types may share a constructor name (Option in option.tsa also has a
+// None). Qualify it where it would be ambiguous.
+data Level = None | Low | High;
+const volume = (l: Level) => match (l) { Level.None => 0, Low => 5, High => 11 };
+
 // Plain identifiers named data/match are untouched.
 const data = [1, 2, 3, 4, 5];
 const match = (re: RegExp, s: string) => re.test(s);
@@ -62,3 +67,4 @@ console.log(showList(pairs(xs)));
 const e = Add(Mul(Num(1), Var("x")), Neg(Neg(Add(Num(2), Num(0)))));
 console.log(showExpr(e), "=>", showExpr(simplify(e)));
 console.log(showOption(evaluate(e, new Map([["x", 40]]))), showOption(evaluate(e, new Map())));
+console.log(volume(Level.None), volume(Low), volume(High));

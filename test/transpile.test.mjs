@@ -220,9 +220,7 @@ test("helpful errors", () => {
   assert.deepEqual(errorsOf(LIST + `const f = (x: List<number>) => match (x) { Cons(a, a) => a, Nil => 0 };`), [
     "Variable 'a' is bound twice in one pattern",
   ]);
-  assert.deepEqual(errorsOf(`data A = X | Y; data B = Y | Z;`), [
-    "Constructor 'Y' is already used by data type 'A'. Constructor names must be unique.",
-  ]);
+  assert.deepEqual(errorsOf(`data A = X | Y | X;`), ["Constructor 'X' appears twice in A"]);
   assert.deepEqual(errorsOf(`data A = X(tag: string);`), ["Field name 'tag' is reserved for the discriminant"]);
 });
 
@@ -505,4 +503,65 @@ test("named-field pattern errors", () => {
   assert.deepEqual(errorsOf(REC + `const f = (s: Shape) => match (s) { Rect { width: radius, radius } => 0, _ => 1 };`), [
     "Rect has no field 'radius' (fields: width, height)",
   ]);
+});
+
+// --------------------------------------------------- qualified constructors
+
+const SHARED = `export data Option<T> = None | Some(value: T);\nexport data Level = None | Low | High;\n`;
+
+test("types may share constructor names; qualified names work in patterns and expressions", () => {
+  const out = run(SHARED + `
+    export data Point = Point(x: number, y: number);
+    const show = (o: Option<number>) => match (o) { Some(v) => "Some " + v, None => "None" };
+    const level = (l: Level) => match (l) { Level.None => 0, Low => 1, High => 2 };
+    const both = (o: Option<number>, l: Level) => match (o, l) { (Option.None, Level.None) => "nothing", _ => "something" };
+    const dist = (p: Point) => match (p) { Point.Point { x, y } => Math.hypot(x, y) };
+    console.log(show(Option.Some(4)), show(Option.None), level(Level.High), level(Level.None));
+    console.log(both(Option.None, Level.None), both(Some(1), Low), dist(Point(3, 4)), dist(Point.Point(6, 8)));`);
+  assert.equal(out, "Some 4 None 2 0\nnothing something 5 10\n");
+});
+
+test("a shared bare name is settled by the other constructors in the match", () => {
+  const { code } = ok(SHARED + `const f = (l: Level) => match (l) { None => 0, Low | High => 1 };`);
+  assert.match(code, /__m0\.tag === "None"/);
+  assert.deepEqual(errorsOf(SHARED + `const f = (l: Level) => match (l) { None => 0, _ => 1 };`), [
+    "Constructor 'None' belongs to several data types; write Option.None or Level.None",
+  ]);
+});
+
+test("counterexamples qualify shared names", () => {
+  assert.deepEqual(errorsOf(SHARED + `const f = (l: Level) => match (l) { Low => 1, High => 2 };`), [
+    "Non-exhaustive match: no arm covers Level.None",
+  ]);
+});
+
+test("qualified name errors", () => {
+  assert.deepEqual(errorsOf(SHARED + `const f = (l: Level) => match (l) { Levl.Low => 1, _ => 0 };`), ["Unknown data type 'Levl'"]);
+  assert.deepEqual(errorsOf(SHARED + `const f = (l: Level) => match (l) { Level.Some(x) => x, _ => 0 };`), [
+    "Level has no constructor 'Some' (constructors: None, Low, High)",
+  ]);
+});
+
+test("the namespace value is emitted only when it can be used", () => {
+  assert.match(ok(`export data T = A | B(n: number);`).code, /export const T = \{\n  A,\n  B,\n\} as const;/);
+  assert.doesNotMatch(ok(`data T = A | B(n: number); const x = B(1); console.log(x, A);`).code, /const T =/);
+  assert.match(ok(`data T = A | B(n: number); const x = T.B(1); console.log(x, A);`).code, /const T =/);
+  // a clash makes the shared constructor reachable only through the namespace
+  const { code } = ok(`data T = A | B; data U = A | C; console.log(T.A, U.A, B, C);`);
+  assert.doesNotMatch(code, /const A:/);
+  assert.match(code, /A: \{ tag: "A" \} as T,/);
+});
+
+test("constructors shared across files resolve against each file's types", () => {
+  const reg = new Registry();
+  const a = "export data Option<T> = None | Some(value: T);";
+  const b = "export data Level = None | Low | High;";
+  const c = `import { Option, Some } from "./a.js";\nexport const f = (o: Option<number>) => match (o) { Some(v) => v, None => 0 };`;
+  collectDataDecls(a, "a.tsa", reg);
+  collectDataDecls(b, "b.tsa", reg);
+  // each file defines its own bare None; no clash within either file
+  assert.match(transpile(a, "a.tsa", reg).code, /export const None: Option<never>/);
+  assert.match(transpile(b, "b.tsa", reg).code, /export const None: Level/);
+  const r = transpile(c, "c.tsa", reg);
+  assert.deepEqual(r.diagnostics, []);
 });

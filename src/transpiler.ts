@@ -4,7 +4,7 @@
 import { checkMatch } from "./exhaustive.js";
 import { Token, TsadtError, tokenize } from "./lexer.js";
 import { Mapped } from "./mapped.js";
-import { boundNames, CtorInfo, DataDecl, Pattern, Registry, showPattern } from "./registry.js";
+import { boundNames, CtorInfo, CtorPattern, DataDecl, Pattern, Registry, showPattern } from "./registry.js";
 
 export interface Diagnostic {
   severity: "error" | "warning";
@@ -282,6 +282,7 @@ class Transpiler {
         if (dup) throw new TsadtError(`Duplicate field '${dup}' in ${t.text}`, this.posOf(j));
         j = close + 1;
       }
+      if (ctors.some((c) => c.name === t.text)) throw new TsadtError(`Constructor '${t.text}' appears twice in ${name}`, t.start);
       ctors.push({ name: t.text, typeName: name, fields, types, pos: t.start, typeSpans });
       if (this.text(j) !== "|") break;
       j++;
@@ -327,13 +328,34 @@ class Transpiler {
       });
       m.gen(` }${k === d.ctors.length - 1 ? ";" : ""}`, c.pos);
     });
-    for (const c of d.ctors) {
+    // A constructor whose name another data type in this file also uses has
+    // no unqualified form here: it exists only as Shape.Circle.
+    const clashes = (c: CtorInfo) =>
+      (this.reg.ctors.get(c.name) ?? []).some((o) => o.typeName !== d.name && this.reg.types.get(o.typeName)?.file === d.file);
+    const nullaryType = d.name + (d.params.length ? `<${d.params.map(() => "never").join(", ")}>` : "");
+
+    // The constructor as a value: a shared object, or a function.
+    // A nullary constructor is one shared value. With type parameters it gets
+    // type List<never>, which is assignable to every List<T> because all
+    // fields are readonly (covariant).
+    const value = (c: CtorInfo) => {
       if (c.fields.length === 0) {
-        // A nullary constructor is one shared value. With type parameters it
-        // gets type List<never>, which is assignable to every List<T>
-        // because all fields are readonly (covariant).
-        const ty = d.name + (d.params.length ? `<${d.params.map(() => "never").join(", ")}>` : "");
-        m.gen(`${NL}${ex}const ${c.name}: ${ty} = { ${tag}: "${c.name}" };`, c.pos);
+        m.gen(`{ ${tag}: "${c.name}" } as ${nullaryType}`, c.pos);
+        return;
+      }
+      params();
+      m.gen("(", c.pos);
+      c.fields.forEach((f, n) => {
+        m.gen(`${n ? ", " : ""}${f}: `, c.pos);
+        type(c, n);
+      });
+      m.gen(`): ${self} => ({ ${tag}: "${c.name}", ${c.fields.join(", ")} })`, c.pos);
+    };
+
+    for (const c of d.ctors) {
+      if (clashes(c)) continue;
+      if (c.fields.length === 0) {
+        m.gen(`${NL}${ex}const ${c.name}: ${nullaryType} = { ${tag}: "${c.name}" };`, c.pos);
       } else {
         m.gen(`${NL}${ex}function ${c.name}`, c.pos);
         params();
@@ -345,6 +367,37 @@ class Transpiler {
         m.gen(`): ${self} {${NL}  return { ${tag}: "${c.name}", ${c.fields.join(", ")} };${NL}}`, c.pos);
       }
     }
+
+    // The namespace value that makes Shape.Circle(1) work. Emitted when it can
+    // be used: the type is exported, this file writes `Shape.`, or a clash
+    // leaves some constructor reachable no other way. (Always emitting it
+    // would trip noUnusedLocals.)
+    const usedHere = this.toks.some((t, k) => t.text === d.name && this.text(k + 1) === "." && this.text(k - 1) !== ".");
+    if (!exported && !usedHere && !d.ctors.some(clashes)) return m;
+    const sameName = d.ctors.find((c) => c.name === d.name && !clashes(c));
+    if (!sameName) {
+      m.gen(`${NL}${ex}const ${d.name} = {`, d.pos);
+      for (const c of d.ctors) {
+        if (clashes(c)) {
+          m.gen(`${NL}  ${c.name}: `, c.pos);
+          value(c);
+          m.gen(",", c.pos);
+        } else {
+          m.gen(`${NL}  ${c.name},`, c.pos);
+        }
+      }
+      m.gen(`${NL}} as const;`, d.pos);
+    } else if (sameName.fields.length > 0) {
+      // data Point = Point(x: number, y: number): the value Point is already
+      // the constructor function, so the other members hang off it.
+      for (const c of d.ctors) {
+        m.gen(`${NL}${d.name}.${c.name} = `, c.pos);
+        if (clashes(c)) value(c);
+        else m.gen(c.name, c.pos);
+        m.gen(";", c.pos);
+      }
+    }
+    // (data Unit = Unit: the value Unit is the constant itself; no namespace.)
     return m;
   }
 
@@ -386,23 +439,11 @@ class Transpiler {
     if (t.kind === "tmpl") throw new TsadtError("Template literals are not allowed in patterns", pos);
     if (t.kind !== "ident") throw new TsadtError(`Expected a pattern but found '${t.text}'`, pos);
 
-    if (/^[A-Z]/.test(t.text)) {
-      if (this.text(j + 1) === "{") return this.parseFieldPattern(j);
-      const args: Pattern[] = [];
-      let k = j + 1;
-      if (this.text(k) === "(") {
-        k++;
-        while (this.text(k) !== ")") {
-          const r = this.parsePattern(k);
-          args.push(r.pat);
-          k = r.next;
-          if (this.text(k) === ",") k++;
-          else if (this.text(k) !== ")") throw new TsadtError(`Expected ',' or ')' in pattern but found ${this.describe(k)}`, this.posOf(k));
-        }
-        k++;
-      }
-      return { pat: { k: "ctor", name: t.text, args, pos }, next: k };
+    // Qualified constructor: Shape.Circle
+    if (this.text(j + 1) === "." && this.toks[j + 2]?.kind === "ident" && /^[A-Z]/.test(this.toks[j + 2].text)) {
+      return this.parseCtorPattern(j + 2, t.text);
     }
+    if (/^[A-Z]/.test(t.text)) return this.parseCtorPattern(j, null);
     if (this.text(j + 1) === "@") {
       // `x @ A | B` means `(x @ A) | B`, as in Rust; write `x @ (A | B)`.
       const r = this.parsePrimaryPattern(j + 2);
@@ -412,19 +453,34 @@ class Transpiler {
   }
 
   /**
-   * Named-field pattern: `Rect { width, height: h, .. }`. A bare field name
-   * binds a variable of that name; `field: pattern` matches the field against
-   * a pattern; fields left out match anything (`..` may be written to say so).
-   * Desugared here into the positional form `Rect(width, h)`, so checking and
-   * code generation need nothing new.
+   * A constructor pattern whose name is at index j: `Cons`, `Cons(h, t)`, or
+   * the named-field form `Rect { width, height: h, .. }`. In the named form a
+   * bare field name binds a variable of that name, `field: pattern` matches
+   * the field against a pattern, and left-out fields match anything (`..` may
+   * be written to say so). Which data type the constructor belongs to, and so
+   * its fields, is settled later by resolveArms().
    */
-  private parseFieldPattern(j: number): { pat: Pattern; next: number } {
+  private parseCtorPattern(j: number, qualifier: string | null): { pat: Pattern; next: number } {
     const t = this.toks[j];
-    const info = this.reg.ctors.get(t.text);
-    if (!info) throw new TsadtError(`Unknown constructor '${t.text}'. Is its data declaration in one of the input files?`, t.start);
-    const close = this.matching(j + 1);
-    const given = new Map<string, Pattern>();
-    let k = j + 2;
+    const pos = qualifier ? this.toks[j - 2].start : t.start;
+    const pat: CtorPattern = { k: "ctor", name: t.text, qualifier, type: null, args: [], fields: null, pos };
+    let k = j + 1;
+    if (this.text(k) === "(") {
+      k++;
+      while (this.text(k) !== ")") {
+        const r = this.parsePattern(k);
+        pat.args.push(r.pat);
+        k = r.next;
+        if (this.text(k) === ",") k++;
+        else if (this.text(k) !== ")") throw new TsadtError(`Expected ',' or ')' in pattern but found ${this.describe(k)}`, this.posOf(k));
+      }
+      return { pat, next: k + 1 };
+    }
+    if (this.text(k) !== "{") return { pat, next: k };
+
+    const close = this.matching(k);
+    pat.fields = [];
+    k++;
     while (k < close) {
       if (this.text(k) === "...") {
         k++;
@@ -433,25 +489,87 @@ class Transpiler {
       } else {
         const f = this.toks[k];
         if (f.kind !== "ident") throw new TsadtError(`Expected a field name but found '${f.text}'`, f.start);
-        if (!info.fields.includes(f.text)) {
-          const list = info.fields.length ? info.fields.join(", ") : "none";
-          throw new TsadtError(`${t.text} has no field '${f.text}' (fields: ${list})`, f.start);
-        }
-        if (given.has(f.text)) throw new TsadtError(`Field '${f.text}' appears twice in this pattern`, f.start);
+        if (pat.fields.some((g) => g.name === f.text)) throw new TsadtError(`Field '${f.text}' appears twice in this pattern`, f.start);
         if (this.text(k + 1) === ":") {
           const r = this.parsePattern(k + 2);
-          given.set(f.text, r.pat);
+          pat.fields.push({ name: f.text, pat: r.pat, pos: f.start });
           k = r.next;
         } else {
-          given.set(f.text, { k: "bind", name: f.text, sub: null, pos: f.start });
+          pat.fields.push({ name: f.text, pat: { k: "bind", name: f.text, sub: null, pos: f.start }, pos: f.start });
           k++;
         }
       }
       if (this.text(k) === ",") k++;
       else if (k !== close) throw new TsadtError(`Expected ',' or '}' in pattern but found ${this.describe(k)}`, this.posOf(k));
     }
-    const args = info.fields.map((f): Pattern => given.get(f) ?? { k: "wild", pos: t.start });
-    return { pat: { k: "ctor", name: t.text, args, pos: t.start }, next: close + 1 };
+    return { pat, next: close + 1 };
+  }
+
+  /**
+   * Decides which data type each constructor pattern in a match belongs to.
+   * A qualified name (`Option.None`) or a name only one type uses is settled
+   * at once. A shared bare name is then settled by the types already seen in
+   * the same match: next to `Some(x)`, `None` means `Option.None`. Named-field
+   * patterns are turned into positional ones here, once the fields are known.
+   */
+  private resolveArms(arms: Arm[]): void {
+    const all: CtorPattern[] = [];
+    const walk = (p: Pattern): void => {
+      if (p.k === "ctor") {
+        all.push(p);
+        p.args.forEach(walk);
+        p.fields?.forEach((f) => walk(f.pat));
+      } else if (p.k === "bind" && p.sub) walk(p.sub);
+      else if (p.k === "or") p.alts.forEach(walk);
+    };
+    for (const a of arms) for (const r of a.rows) r.forEach(walk);
+
+    const candidates = new Map<CtorPattern, CtorInfo[]>();
+    const known = new Set<string>();
+    for (const p of all) {
+      let c: CtorInfo[];
+      if (p.qualifier) {
+        const d = this.reg.types.get(p.qualifier);
+        if (!d) throw new TsadtError(`Unknown data type '${p.qualifier}'`, p.pos);
+        const info = d.ctors.find((x) => x.name === p.name);
+        if (!info) {
+          throw new TsadtError(`${p.qualifier} has no constructor '${p.name}' (constructors: ${d.ctors.map((x) => x.name).join(", ")})`, p.pos);
+        }
+        c = [info];
+      } else {
+        c = this.reg.ctors.get(p.name) ?? [];
+        if (c.length === 0) throw new TsadtError(`Unknown constructor '${p.name}'. Is its data declaration in one of the input files?`, p.pos);
+      }
+      candidates.set(p, c);
+      if (c.length === 1) known.add(c[0].typeName);
+    }
+
+    for (const p of all) {
+      let c = candidates.get(p)!;
+      if (c.length > 1) {
+        const settled = c.filter((x) => known.has(x.typeName));
+        if (settled.length !== 1) {
+          throw new TsadtError(
+            `Constructor '${p.name}' belongs to several data types; write ${c.map((x) => `${x.typeName}.${p.name}`).join(" or ")}`,
+            p.pos,
+          );
+        }
+        c = settled;
+      }
+      const info = c[0];
+      p.type = info.typeName;
+      if (p.fields) {
+        for (const f of p.fields) {
+          if (!info.fields.includes(f.name)) {
+            const list = info.fields.length ? info.fields.join(", ") : "none";
+            throw new TsadtError(`${p.name} has no field '${f.name}' (fields: ${list})`, f.pos);
+          }
+        }
+        const fields = p.fields;
+        p.args = info.fields.map((name): Pattern => fields.find((f) => f.name === name)?.pat ?? { k: "wild", pos: p.pos });
+        p.fields = null;
+      }
+    }
   }
 
   /**
@@ -537,8 +655,7 @@ class Transpiler {
         if (p.sub) this.validate(p.sub, names);
         return;
       case "ctor": {
-        const info = this.reg.ctors.get(p.name);
-        if (!info) throw new TsadtError(`Unknown constructor '${p.name}'. Is its data declaration in one of the input files?`, p.pos);
+        const info = this.reg.ctor(p.type!, p.name)!;
         if (info.fields.length !== p.args.length) {
           throw new TsadtError(`${p.name} has ${info.fields.length} field(s) but the pattern gives ${p.args.length}`, p.pos);
         }
@@ -582,7 +699,6 @@ class Transpiler {
     while (j < bClose) {
       const armStart = j;
       const { rows, next } = this.parseArmPatterns(j, width);
-      this.validateAlternatives(rows, new Set());
       j = next;
 
       let guard: Mapped | null = null;
@@ -617,6 +733,8 @@ class Transpiler {
       arms.push({ rows, guard, guardPos, body, bodyPos, block, pos: this.posOf(armStart) });
     }
     if (arms.length === 0) throw new TsadtError("match has no arms", matchPos);
+    this.resolveArms(arms);
+    for (const a of arms) this.validateAlternatives(a.rows, new Set());
 
     const check = checkMatch(arms.map((a) => ({ rows: a.rows, guarded: a.guard !== null })), this.reg);
     for (const k of check.redundant) {
@@ -664,7 +782,7 @@ class Transpiler {
         conds.push([`${path} === ${p.text}`, p.pos]);
         return;
       case "ctor": {
-        const info = this.reg.ctors.get(p.name)!;
+        const info = this.reg.ctor(p.type!, p.name)!;
         conds.push([`${path}.${this.tag} === "${p.name}"`, p.pos]);
         p.args.forEach((a, k) => this.compilePattern(a, `${path}.${info.fields[k]}`, conds, binds));
         return;
@@ -790,15 +908,8 @@ function register(reg: Registry, d: DataDecl, error: (msg: string) => void): voi
     error(`Data type '${d.name}' is already declared in ${prior.file}`);
     return;
   }
-  for (const c of d.ctors) {
-    const other = reg.ctors.get(c.name);
-    if (other) {
-      error(`Constructor '${c.name}' is already used by data type '${other.typeName}'. Constructor names must be unique.`);
-      return;
-    }
-  }
   reg.types.set(d.name, d);
-  for (const c of d.ctors) reg.ctors.set(c.name, c);
+  for (const c of d.ctors) reg.ctors.set(c.name, [...(reg.ctors.get(c.name) ?? []), c]);
 }
 
 function errorDiag(e: unknown, t: Transpiler | null, src: string, file: string): Diagnostic {

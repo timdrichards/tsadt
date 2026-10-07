@@ -39,7 +39,8 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
 ## Features
 
 - **`data` declarations** with named or positional fields, generics,
-  constraints and defaults. Values are immutable, and nullary constructors
+  constraints and defaults, and qualified constructor names (`Shape.Circle`)
+  so types can share constructor names. Values are immutable, and nullary constructors
   like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
   wildcards, or-patterns, named-field patterns, `x @ pattern` bindings,
@@ -126,8 +127,35 @@ data Pair = Pair(number, string);     // positional fields are named _0, _1
 
 Each declaration produces a union type, a constructor function for each
 variant with fields, and a constant for each variant without. Constructor
-names start with an uppercase letter and must be unique across your files,
-because patterns refer to them by name.
+names start with an uppercase letter.
+
+Every constructor can also be written qualified by its type, in expressions
+and in patterns: `Shape.Circle(1)`, `Option.None`, `List.Cons(h, t)`. That
+lets two types share a constructor name:
+
+```ts
+data Option<T> = None | Some(value: T);
+data Level = None | Low | High;
+
+const volume = (l: Level) => match (l) {
+  Level.None => 0,
+  Low => 5,
+  High => 11,
+};
+
+const show = (o: Option<number>) => match (o) {
+  Some(v) => `${v}`,
+  None => "nothing",       // Option.None: the Some(v) arm settles it
+};
+
+volume(Level.None);
+show(Option.None);
+```
+
+A bare constructor name in a pattern is fine when only one type uses it, or
+when the other constructors in the same match settle which type is meant.
+Otherwise tsadt asks you to qualify it. In expressions, a name that two types
+in the same file share exists only in qualified form.
 
 ### Matching
 
@@ -307,8 +335,7 @@ There is also a library API in `dist/index.js`: `transpile`,
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for the full list. Next up: qualified constructor
-names (`Shape.Circle`) and `deriving (Eq, Show, Ord)`.
+See [TODO.md](TODO.md) for the full list. Next up: `deriving (Eq, Show, Ord)`.
 
 ## Development
 
