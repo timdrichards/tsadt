@@ -40,7 +40,25 @@ const CONTINUATION_KEYWORDS = new Set([
   "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
   "throw", "case", "do", "else", "yield", "await", "extends",
 ]);
-const LITERAL_IDENTS =new Set(["true", "false", "null", "undefined"]);
+// Names that never start a clause function.
+const NOT_CLAUSE_NAMES = new Set([
+  "if", "for", "while", "switch", "catch", "function", "return", "typeof", "async", "await", "yield",
+  "new", "super", "import", "export", "match", "data", "do", "else", "try", "with", "void", "delete",
+  "throw", "case", "default", "class", "interface", "type", "enum", "declare", "namespace", "module",
+  "let", "const", "var", "this",
+]);
+// A line ending with one of these continues on the next line ...
+const CONTINUES_AFTER = new Set([
+  "(", "[", "{", ",", ".", "?.", "=>", "?", ":", "=", "+", "-", "*", "/", "%", "**", "&&", "||", "??",
+  "&", "|", "^", "<", ">", "!", "~", "==", "===", "!=", "!==", "+=", "-=", "*=", "/=", "%=", "&&=", "||=", "??=",
+  "new", "typeof", "void", "delete", "await", "in", "instanceof", "of", "as", "satisfies", "keyof", "...",
+]);
+// ... and so does one whose next line starts with one of these.
+const CONTINUES_BEFORE = new Set([
+  ".", "?.", "?", ":", "=>", "=", "*", "/", "%", "**", "&&", "||", "??", "&", "|", "^", "<", ">", "==", "===",
+  "!=", "!==", "+", "-", "(", "[", "in", "instanceof", "as", "satisfies", ",",
+]);
+const LITERAL_IDENTS = new Set(["true", "false", "null", "undefined"]);
 const OPEN: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
 const CLOSE = new Set([")", "]", "}"]);
 
@@ -60,6 +78,7 @@ class Transpiler {
   readonly diags: Diagnostic[] = [];
   private lineStarts: number[] = [0];
   private counter = 0;
+  private depth: number[];
   /** Generic helpers that derived operations in this file use. */
   private helpers = new Set<string>();
   private tag: string;
@@ -73,6 +92,14 @@ class Transpiler {
     this.tag = opts.tagField ?? "tag";
     for (let i = 0; i < src.length; i++) if (src[i] === "\n") this.lineStarts.push(i + 1);
     this.toks = tokenize(src);
+    // Bracket depth of each token, to find statements at the top level.
+    let d = 0;
+    this.depth = this.toks.map((t) => {
+      if (t.kind === "punct" && CLOSE.has(t.text)) d--;
+      const here = d;
+      if (t.kind === "punct" && t.text in OPEN) d++;
+      return here;
+    });
   }
 
   // ---------------------------------------------------------------- helpers
@@ -223,6 +250,7 @@ class Transpiler {
       if (this.isDataStart(i)) r = this.handleData(i, false);
       else if (this.text(i) === "export" && this.isDataStart(i + 1)) r = this.handleData(i + 1, true);
       else if (this.isMatchStart(i)) r = this.handleMatch(i);
+      else r = this.tryClauseFunction(i);
       if (!r) {
         i++;
         continue;
@@ -246,14 +274,17 @@ class Transpiler {
     let params: string[] = [];
     let paramText = "";
     let paramSpan: [number, number] | null = null;
+    let paramDecls: string[] = [];
     if (this.text(j) === "<") {
       const close = this.matchingAngle(j);
       paramText = this.slice(j, close + 1);
       paramSpan = [this.toks[j].start, this.toks[close].end];
-      params = this.splitCommas(j + 1, close, true).map(([s]) => {
+      const segs = this.splitCommas(j + 1, close, true);
+      params = segs.map(([s]) => {
         if (this.toks[s].kind !== "ident") throw new TsadtError("Expected a type parameter name", this.posOf(s));
         return this.toks[s].text;
       });
+      paramDecls = segs.map(([a, b]) => this.slice(a, b));
       j = close + 1;
     }
     this.expect(j, "=");
@@ -321,7 +352,7 @@ class Transpiler {
       }
     }
     if (this.text(j) === ";") j++;
-    return { decl: { name, params, paramText, paramSpan, ctors, deriving, derivingPos, file: this.file, pos }, next: j };
+    return { decl: { name, params, paramDecls, paramText, paramSpan, ctors, deriving, derivingPos, file: this.file, pos }, next: j };
   }
 
   collect(): void {
@@ -781,12 +812,33 @@ class Transpiler {
       arms.push({ rows, guard, guardPos, body, bodyPos, block, pos: this.posOf(armStart) });
     }
     if (arms.length === 0) throw new TsadtError("match has no arms", matchPos);
+    const out = new Mapped();
+    if (!usesAwait && this.needsAsiGuard(i)) out.gen(";", matchPos);
+    out.add(this.compileArms(arms, width, scrutinee, usesAwait, matchPos, null));
+    return { out, next: bClose + 1 };
+  }
+
+  /**
+   * Checks and compiles the arms of a match, or the clauses of a clause
+   * function (`fn` names it, for messages). Returns the generated expression.
+   */
+  private compileArms(
+    arms: Arm[],
+    width: number,
+    scrutinee: Mapped,
+    usesAwait: boolean,
+    matchPos: number,
+    fn: string | null,
+    indent = this.indentAt(matchPos),
+  ): Mapped {
     this.resolveArms(arms);
     for (const a of arms) this.validateAlternatives(a.rows, new Set());
 
+    const what = fn === null ? "match arm" : "clause";
     const check = checkMatch(arms.map((a) => ({ rows: a.rows, guarded: a.guard !== null })), this.reg);
     for (const k of check.redundant) {
-      this.report("warning", `Unreachable match arm '${showArm(arms[k].rows)}' (removed from output)`, arms[k].pos);
+      const shown = fn === null ? showArm(arms[k].rows) : `${fn}${arms[k].rows.map((r) => `(${r.map(showPattern).join(", ")})`).join(" | ")}`;
+      this.report("warning", `Unreachable ${what} '${shown}' (removed from output)`, arms[k].pos);
     }
     // Drop unreachable alternatives too: TypeScript would reject the test
     // for an already-excluded case as a comparison with no overlap.
@@ -796,13 +848,15 @@ class Transpiler {
       arms[arm].rows.splice(alt, 1);
     }
     if (check.missing !== null) {
-      this.report("error", `Non-exhaustive match: no arm covers ${check.missing}`, matchPos);
+      if (fn === null) {
+        this.report("error", `Non-exhaustive match: no arm covers ${check.missing}`, matchPos);
+      } else {
+        const args = width === 1 ? `(${check.missing})` : check.missing;
+        this.report("error", `Non-exhaustive function ${fn}: no clause covers ${fn}${args}`, matchPos);
+      }
     }
     const live = arms.filter((_, k) => !check.redundant.includes(k));
-    const out = new Mapped();
-    if (!usesAwait && this.needsAsiGuard(i)) out.gen(";", matchPos);
-    out.add(this.genMatch(live, width, scrutinee, usesAwait, matchPos));
-    return { out, next: bClose + 1 };
+    return this.genMatch(live, width, scrutinee, usesAwait, matchPos, indent);
   }
 
   /**
@@ -815,6 +869,343 @@ class Transpiler {
     if (prev.kind === "punct") return prev.text === ")" || prev.text === "]" || prev.text === "++" || prev.text === "--";
     if (prev.kind === "ident") return !CONTINUATION_KEYWORDS.has(prev.text);
     return true; // number, string, template, regex
+  }
+
+  // ------------------------------------------------------- clause functions
+  //
+  //   length(Nil): number => 0
+  //   length(Cons(_, t)) => 1 + length(t)
+  //
+  // A group of clauses at the top level of a file becomes one function whose
+  // body is a match on its parameters. Parameter types come from the
+  // patterns where they can (a constructor gives its data type, a literal
+  // its primitive type) and from annotations (`ys: List<T>`) where they
+  // cannot. A bodiless signature `function f(...): R;` just before the
+  // clauses may supply all of it instead.
+
+  /** Tokens at the top level that start a new statement. */
+  private atStatementStart(i: number): boolean {
+    if (this.depth[i] !== 0) return false;
+    const prev = this.toks[i - 1];
+    if (!prev) return true;
+    if (prev.text === ";" || prev.text === "}" || prev.text === "export") return true;
+    return this.src.slice(prev.end, this.toks[i].start).includes("\n");
+  }
+
+  /** If a clause `name[<...>](...) [: R] [if g] =>` starts at i, its name and parameter parens. */
+  private clauseAt(i: number): { name: string; open: number; close: number; generics: [number, number] | null } | null {
+    const t = this.toks[i];
+    if (!t || t.kind !== "ident" || NOT_CLAUSE_NAMES.has(t.text) || !this.atStatementStart(i)) return null;
+    let open = i + 1;
+    let generics: [number, number] | null = null;
+    try {
+      if (this.text(open) === "<") {
+        const g = this.matchingAngle(open);
+        generics = [open, g + 1];
+        open = g + 1;
+      }
+      if (this.text(open) !== "(") return null;
+      const close = this.matching(open);
+      const after = this.text(close + 1);
+      if (after === "=>" || after === "if") return { name: t.text, open, close, generics };
+      if (after !== ":") return null;
+      // A return type must run on to `=>` or `if` before anything that ends
+      // a statement.
+      for (let k = close + 2; k < this.toks.length; ) {
+        const x = this.text(k)!;
+        if (x === "=>" || x === "if") return k > close + 2 ? { name: t.text, open, close, generics } : null;
+        if (x === ";" || CLOSE.has(x)) return null;
+        if (k > close + 2 && this.src.slice(this.toks[k - 1].end, this.toks[k].start).includes("\n") && !/^[|&]$/.test(x)) return null;
+        k = x in OPEN ? this.matching(k) + 1 : k + 1;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+
+  /** `[export] function name<...>(params): R;` directly followed by clauses of name. */
+  private signatureAt(i: number): { name: string; end: number; exported: boolean } | null {
+    let k = i;
+    const exported = this.text(k) === "export";
+    if (exported) k++;
+    if (this.text(k) !== "function" || !this.atStatementStart(i)) return null;
+    const nameTok = this.toks[k + 1];
+    if (!nameTok || nameTok.kind !== "ident") return null;
+    try {
+      let open = k + 2;
+      if (this.text(open) === "<") open = this.matchingAngle(open) + 1;
+      if (this.text(open) !== "(") return null;
+      let j = this.matching(open) + 1;
+      if (this.text(j) === ":") {
+        j++;
+        while (j < this.toks.length && this.text(j) !== ";") {
+          const x = this.text(j)!;
+          if (x === "{" && /^(ident|num|str)$/.test(this.toks[j - 1].kind)) return null; // a body
+          if (CLOSE.has(x)) return null;
+          j = x in OPEN ? this.matching(j) + 1 : j + 1;
+        }
+      }
+      if (this.text(j) !== ";") return null;
+      const c = this.clauseAt(j + 1);
+      return c && c.name === nameTok.text ? { name: nameTok.text, end: j, exported } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Where an expression body that started at j ends: at `;` or at a line break that ends the statement. */
+  private clauseBodyEnd(j: number): { end: number; next: number } {
+    let k = j;
+    while (k < this.toks.length) {
+      const x = this.text(k)!;
+      if (x === ";") return { end: k, next: k + 1 };
+      if (CLOSE.has(x)) return { end: k, next: k };
+      const last = x in OPEN ? this.matching(k) : k;
+      const nxt = last + 1;
+      if (nxt >= this.toks.length) return { end: nxt, next: nxt };
+      const broken = this.src.slice(this.toks[last].end, this.toks[nxt].start).includes("\n");
+      if (broken && !CONTINUES_AFTER.has(this.text(last)!) && !CONTINUES_BEFORE.has(this.text(nxt)!)) {
+        return { end: nxt, next: nxt };
+      }
+      k = nxt;
+    }
+    return { end: k, next: k };
+  }
+
+  private tryClauseFunction(i: number): { out: Mapped; next: number } | null {
+    const sig = this.signatureAt(i);
+    let first = i;
+    let exported = false;
+    if (sig) first = sig.end + 1;
+    else if (this.text(i) === "export" && this.clauseAt(i + 1)) {
+      exported = true;
+      first = i + 1;
+    }
+    const head = this.clauseAt(first);
+    if (!head) return null;
+    const name = head.name;
+
+    interface Clause extends Arm {
+      annots: Array<[number, number] | null>;
+      ret: [number, number] | null;
+      bodyStart: number;
+      end: number;
+    }
+    const clauses: Clause[] = [];
+    let usesAwait = false;
+    let j = first;
+    for (;;) {
+      const c = clauses.length === 0 ? head : this.clauseAt(j);
+      if (!c || c.name !== name) break;
+      if (c.generics && clauses.length > 0) throw new TsadtError("Type parameters go on the first clause only", this.posOf(c.generics[0]));
+      const start = j;
+      const pats: Pattern[] = [];
+      const annots: Array<[number, number] | null> = [];
+      for (const [a, b] of this.splitCommas(c.open + 1, c.close, true)) {
+        if (a === b) throw new TsadtError("Empty parameter pattern", this.posOf(a));
+        let colon = -1;
+        for (let k = a; k < b; k = this.text(k)! in OPEN ? this.matching(k) + 1 : k + 1) {
+          if (this.text(k) === ":") {
+            colon = k;
+            break;
+          }
+        }
+        const r = this.parsePattern(a);
+        if (r.next !== (colon >= 0 ? colon : b)) {
+          throw new TsadtError(`Unexpected ${this.describe(r.next)} in the pattern for ${name}`, this.posOf(r.next));
+        }
+        pats.push(r.pat);
+        annots.push(colon >= 0 ? [colon + 1, b] : null);
+      }
+      if (pats.length === 0) throw new TsadtError(`A clause function needs at least one parameter: ${name}()`, this.posOf(start));
+      let k = c.close + 1;
+      let ret: [number, number] | null = null;
+      if (this.text(k) === ":") {
+        const e = this.scanTo(k + 1, this.toks.length, ["=>", "if"]);
+        ret = [k + 1, e];
+        k = e;
+      }
+      let guard: Mapped | null = null;
+      let guardPos = 0;
+      if (this.text(k) === "if") {
+        const g = this.scanTo(k + 1, this.toks.length, ["=>"]);
+        if (g === k + 1) throw new TsadtError("Empty guard", this.posOf(k));
+        guard = this.transform(k + 1, g);
+        guardPos = this.posOf(k + 1);
+        k = g;
+      }
+      this.expect(k, "=>", `'=>' after the parameters of ${name}`);
+      k++;
+      const bodyPos = this.posOf(k);
+      const bodyStart = k;
+      let body: Mapped;
+      let block = false;
+      if (this.text(k) === "{") {
+        const close = this.matching(k);
+        body = this.transform(k + 1, close);
+        block = true;
+        j = close + 1;
+        if (this.text(j) === ";") j++;
+      } else {
+        const e = this.clauseBodyEnd(k);
+        if (e.end === k) throw new TsadtError("Missing expression after '=>'", this.posOf(k));
+        body = this.transform(k, e.end);
+        j = e.next;
+      }
+      for (let x = start; x < j; x++) if (this.text(x) === "await") usesAwait = true;
+      clauses.push({ rows: [pats], guard, guardPos, body, bodyPos, block, pos: this.posOf(start), annots, ret, bodyStart, end: j });
+      if (j >= this.toks.length) break;
+    }
+
+    const width = clauses[0].rows[0].length;
+    for (const c of clauses) {
+      if (c.rows[0].length !== width) {
+        throw new TsadtError(`Every clause of ${name} must take the same number of arguments (the first takes ${width})`, c.pos);
+      }
+    }
+    const pos = clauses[0].pos;
+    this.resolveArms(clauses);
+
+    // Parameter names: a variable some clause binds there, else one made up
+    // from the parameter's type.
+    const taken = new Set<string>([name]);
+    const paramNames: string[] = [];
+    const paramTypes: Mapped[] = [];
+    const typeVars: Array<[string, string]> = [];
+    const addVar = (v: string, decl: string) => {
+      if (!typeVars.some(([n]) => n === v)) typeVars.push([v, decl]);
+    };
+    let sigText: Mapped | null = null;
+
+    if (sig) {
+      if (clauses.some((c) => c.ret || c.annots.some((a) => a))) {
+        throw new TsadtError(`${name} has a signature, so its clauses cannot also carry types`, pos);
+      }
+      sigText = new Mapped().copy(this.src, this.toks[i].start, this.toks[sig.end - 1].end);
+      // parameter names, in order, from the signature
+      let open = i + (sig.exported ? 3 : 2);
+      if (this.text(open) === "<") open = this.matchingAngle(open) + 1;
+      for (const [a] of this.splitCommas(open + 1, this.matching(open), true)) {
+        if (this.toks[a]?.kind !== "ident") throw new TsadtError("Clause function signatures need plain parameter names", this.posOf(a));
+        paramNames.push(this.toks[a].text);
+      }
+      if (paramNames.length !== width) {
+        throw new TsadtError(`The signature of ${name} has ${paramNames.length} parameter(s) but its clauses take ${width}`, pos);
+      }
+    } else {
+      for (let k = 0; k < width; k++) {
+        // type
+        const annotated = clauses.filter((c) => c.annots[k]);
+        const texts = new Set(annotated.map((c) => this.slice(c.annots[k]![0], c.annots[k]![1])));
+        if (texts.size > 1) throw new TsadtError(`Parameter ${k + 1} of ${name} is given different types: ${[...texts].join(" and ")}`, annotated[1].pos);
+        if (annotated.length) {
+          const [a, b] = annotated[0].annots[k]!;
+          paramTypes.push(new Mapped().copy(this.src, this.toks[a].start, this.toks[b - 1].end));
+        } else {
+          paramTypes.push(this.inferParamType(clauses.map((c) => c.rows[0][k]), k, name, addVar));
+        }
+        // name: the first variable a clause binds here, else one made from the type
+        const here = clauses.map((c) => c.rows[0][k]);
+        let pn = here.map((p) => (p.k === "bind" ? p.name : "")).find((v) => v && !taken.has(v));
+        if (!pn) {
+          const ctor = here.find((p): p is CtorPattern => p.k === "ctor");
+          const base = ctor ? ctor.type!.charAt(0).toLowerCase() + ctor.type!.slice(1) : "arg";
+          pn = base;
+          for (let n = 2; taken.has(pn); n++) pn = `${base}${n}`;
+        }
+        taken.add(pn);
+        paramNames.push(pn);
+      }
+    }
+
+    const scrutinee = new Mapped().gen(paramNames.join(", "), pos);
+    const matchCode = this.compileArms(clauses, width, scrutinee, usesAwait, pos, name, this.indentAt(pos) + "  ");
+
+    const out = new Mapped();
+    if (sigText) {
+      out.add(sigText).gen(" {", pos);
+    } else {
+      const rets = clauses.filter((c) => c.ret);
+      const retTexts = new Set(rets.map((c) => this.slice(c.ret![0], c.ret![1])));
+      if (retTexts.size > 1) throw new TsadtError(`${name} is given different return types: ${[...retTexts].join(" and ")}`, rets[1].pos);
+      if (!rets.length) {
+        const recursive = clauses.some((c) => {
+          for (let x = c.bodyStart; x < c.end; x++) if (this.text(x) === name && this.text(x + 1) === "(" && this.text(x - 1) !== ".") return true;
+          return false;
+        });
+        if (recursive) {
+          throw new TsadtError(
+            `${name} calls itself, so TypeScript needs its return type: add one after the first clause's parameters, as in ${name}(...): Type =>`,
+            pos,
+          );
+        }
+      }
+      // type variables: explicit <...> on the first clause, or those the
+      // inferred types use plus single capitals (T, U, T2) in annotations
+      let generics = "";
+      if (head.generics) {
+        generics = this.slice(head.generics[0], head.generics[1]);
+      } else {
+        const annTokens: number[] = [];
+        for (const c of clauses) {
+          for (const a of c.annots) if (a) for (let x = a[0]; x < a[1]; x++) annTokens.push(x);
+          if (c.ret) for (let x = c.ret[0]; x < c.ret[1]; x++) annTokens.push(x);
+        }
+        for (const x of annTokens) {
+          const t = this.toks[x];
+          if (t.kind === "ident" && /^[A-Z][0-9]*$/.test(t.text) && this.text(x - 1) !== ".") addVar(t.text, t.text);
+        }
+        if (typeVars.length) generics = `<${typeVars.map(([, d]) => d).join(", ")}>`;
+      }
+      out.gen(`${exported ? "export " : ""}${usesAwait ? "async " : ""}function ${name}${generics}(`, pos);
+      paramNames.forEach((pn, k) => {
+        out.gen(`${k ? ", " : ""}${pn}: `, clauses[0].rows[0][k].pos).add(paramTypes[k]);
+      });
+      out.gen(")", pos);
+      if (rets.length) out.gen(": ", pos).copy(this.src, this.toks[rets[0].ret![0]].start, this.toks[rets[0].ret![1] - 1].end);
+      out.gen(" {", pos);
+    }
+    if (sig && usesAwait && !/\basync\b/.test(sigText!.text)) {
+      throw new TsadtError(`A clause of ${name} uses await, so its signature must be async`, pos);
+    }
+    const ind = this.indentAt(pos);
+    out.gen(`\n${ind}  return `, pos).add(matchCode).gen(`;\n${ind}}`, pos);
+    return { out, next: clauses[clauses.length - 1].end };
+  }
+
+  /** The type the patterns in one parameter position imply. */
+  private inferParamType(pats: Pattern[], k: number, fn: string, addVar: (v: string, decl: string) => void): Mapped {
+    const types = new Set<string>();
+    const lits = new Set<string>();
+    const walk = (p: Pattern): void => {
+      if (p.k === "ctor") types.add(p.type!);
+      else if (p.k === "lit") {
+        if (/^-?[0-9.]/.test(p.text)) lits.add(/n$/.test(p.text) ? "bigint" : "number");
+        else if (/^["']/.test(p.text)) lits.add("string");
+        else if (p.text === "true" || p.text === "false") lits.add("boolean");
+        else lits.add(p.text); // null, undefined
+      } else if (p.k === "bind" && p.sub) walk(p.sub);
+      else if (p.k === "or") p.alts.forEach(walk);
+    };
+    pats.forEach(walk);
+    const nth = ["first", "second", "third", "fourth", "fifth"][k] ?? `${k + 1}th`;
+    const at = pats[0].pos;
+    if (types.size > 1) throw new TsadtError(`The ${nth} parameter of ${fn} is matched against constructors of different types: ${[...types].join(" and ")}`, at);
+    if (types.size === 1 && lits.size > 0) throw new TsadtError(`The ${nth} parameter of ${fn} is matched against both constructors and literals`, at);
+    if (types.size === 1) {
+      const d = this.reg.types.get([...types][0])!;
+      d.params.forEach((p, n) => addVar(p, d.paramDecls[n] ?? p));
+      return new Mapped().gen(d.name + (d.params.length ? `<${d.params.join(", ")}>` : ""), at);
+    }
+    if (lits.size > 0) return new Mapped().gen([...lits].join(" | "), at);
+    const v = pats.find((p) => p.k === "bind");
+    const example = v && v.k === "bind" ? v.name : "x";
+    throw new TsadtError(
+      `Cannot tell the type of the ${nth} parameter of ${fn}: no clause matches it against a constructor or literal. ` +
+        `Give it a type in one clause (${example}: SomeType) or write a signature.`,
+      at,
+    );
   }
 
   /** Appends tests and bindings for p, each attributed to its sub-pattern. */
@@ -875,12 +1266,12 @@ class Transpiler {
     return variants;
   }
 
-  private genMatch(arms: Arm[], width: number, scrutinee: Mapped, isAsync: boolean, pos: number): Mapped {
+  private genMatch(arms: Arm[], width: number, scrutinee: Mapped, isAsync: boolean, pos: number, indent: string): Mapped {
     const m = new Mapped();
     // One parameter per matched value: (__m0) or (__m0_0, __m0_1, ...).
     const base = `__m${this.counter++}`;
     const vars = width === 1 ? [base] : Array.from({ length: width }, (_, k) => `${base}_${k}`);
-    const NL = "\n" + this.indentAt(pos);
+    const NL = "\n" + indent;
     const asyncKw = isAsync ? "async " : "";
     m.gen(`${isAsync ? "(await " : ""}(${asyncKw}(${vars.join(", ")}) => {`, pos);
     let irrefutable = false;

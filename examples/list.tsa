@@ -16,21 +16,16 @@ export function map<T, U>(xs: List<T>, f: (x: T) => U): List<U> {
   };
 }
 
-export function sum(xs: List<number>): number {
-  return match (xs) {
-    Nil => 0,
-    Cons(h, t) => h + sum(t),
-  };
-}
+// Clause functions: one equation per case. The list's type comes from the
+// patterns; this one adds its elements, so the annotation pins it to numbers.
+// Recursive functions need their return type.
+export sum(Nil: List<number>): number => 0
+sum(Cons(h, t)) => h + sum(t)
 
-// Nested patterns: the second arm only fires for one-element lists.
-export function last<T>(xs: List<T>): Option<T> {
-  return match (xs) {
-    Nil => None,
-    Cons(x, Nil) => Some(x),
-    Cons(_, rest) => last(rest),
-  };
-}
+// Nested patterns: the second clause only fires for one-element lists.
+export last(Nil): Option<T> => None
+last(Cons(x, Nil)) => Some(x)
+last(Cons(_, rest)) => last(rest)
 
 // Pairs up adjacent elements, dropping a leftover odd one.
 export function pairs<T>(xs: List<T>): List<[T, T]> {

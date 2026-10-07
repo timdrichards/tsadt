@@ -26,6 +26,8 @@ export interface DataDecl {
   name: string;
   /** Type parameter names, e.g. ["T"] for `List<T>`. */
   params: string[];
+  /** Each type parameter as declared, e.g. ["T extends object = {}"]. */
+  paramDecls: string[];
   /** Type parameter list as written, e.g. "<T extends object = {}>", or "". */
   paramText: string;
   /** Source offsets [start, end) of paramText, or null if there are none. */

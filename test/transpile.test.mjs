@@ -624,3 +624,108 @@ test("deriving errors", () => {
     "Unit.show has nowhere to go: the name Unit is already the value of its constructor Unit. Rename the type or the constructor.",
   ]);
 });
+
+// ---------------------------------------------------------- clause functions
+
+const CL = `export data Option<T> = None | Some(value: T) deriving (Show);
+export data List<T> = Nil | Cons(head: T, tail: List<T>) deriving (Show);
+`;
+
+test("clause functions: inferred parameter types, annotations, guards, signatures", () => {
+  const out = run(CL + `
+export length(Nil): number => 0
+length(Cons(_, t)) => 1 + length(t)
+
+export head(Cons(a, _)) => Some(a)
+head(Nil) => None
+
+export append(Nil, ys: List<T>): List<T> => ys;
+append(Cons(x, xs), ys) => Cons(x, append(xs, ys));
+
+export fact(0): number => 1
+fact(n) if n > 0 => n * fact(n - 1)
+fact(_) => 1
+
+export function zip<A, B>(xs: List<A>, ys: List<B>): List<[A, B]>;
+zip(Cons(x, xt), Cons(y, yt)) => Cons([x, y] as [A, B], zip(xt, yt))
+zip(_, _) => Nil
+
+export describe(n: number, "s") => {
+  const unit = n === 1 ? "second" : "seconds";
+  return n + " " + unit;
+}
+describe(n, unit) => n + " " + unit
+
+export sumAll(Nil: List<number>): number => 0
+sumAll(Cons(x, rest)) => x
+  + sumAll(rest)
+
+const l = Cons(1, Cons(2, Cons(3, Nil)));
+console.log(length(l), Option.show(head(l)), Option.show(head(Nil)), List.show(append(l, Cons(4, Nil))), fact(5), fact(-2));
+console.log(List.show(zip(l, Cons("a", Cons("b", Nil)))), describe(1, "s"), describe(3, "m"), sumAll(l));
+`);
+  assert.equal(out, [
+    "3 Some(1) None Cons(1, Cons(2, Cons(3, Cons(4, Nil)))) 120 1",
+    'Cons([1, "a"], Cons([2, "b"], Nil)) 1 second 3 m 6',
+    "",
+  ].join("\n"));
+});
+
+test("clause functions generate an ordinary typed function", () => {
+  const { code } = ok(CL + `export length(Nil): number => 0\nlength(Cons(_, t)) => 1 + length(t)\n`);
+  assert.match(code, /export function length<T>\(list: List<T>\): number \{\n  return \(\(__m0\) => \{/);
+  // without recursion the return type may be left to TypeScript
+  assert.match(ok(CL + `isEmpty(Nil) => true\nisEmpty(Cons(_, _)) => false\nconsole.log(isEmpty(Nil));\n`).code, /function isEmpty<T>\(list: List<T>\) \{/);
+});
+
+test("clause function errors", () => {
+  assert.deepEqual(errorsOf(CL + `append(Nil, ys): List<number> => ys\nappend(Cons(x, xs), ys) => Cons(x, append(xs, ys))\n`), [
+    "Cannot tell the type of the second parameter of append: no clause matches it against a constructor or literal. Give it a type in one clause (ys: SomeType) or write a signature.",
+  ]);
+  assert.deepEqual(errorsOf(CL + `length(Nil) => 0\nlength(Cons(_, t)) => 1 + length(t)\n`), [
+    "length calls itself, so TypeScript needs its return type: add one after the first clause's parameters, as in length(...): Type =>",
+  ]);
+  assert.deepEqual(errorsOf(CL + `f(Nil): number => 0\nf(Cons(_, _), x: number) => x\n`), [
+    "Every clause of f must take the same number of arguments (the first takes 1)",
+  ]);
+  assert.deepEqual(errorsOf(CL + `f(Nil): number => 0\nf(Some(_)) => 1\n`), [
+    "The first parameter of f is matched against constructors of different types: List and Option",
+  ]);
+  assert.deepEqual(errorsOf(CL + `function f(xs: List<number>): number;\nf(Nil): number => 0\nf(Cons(x, _)) => x\n`), [
+    "f has a signature, so its clauses cannot also carry types",
+  ]);
+  assert.deepEqual(errorsOf(CL + `export length(Nil): number => 0\n`), [
+    "Non-exhaustive function length: no clause covers length(Cons(_, _))",
+  ]);
+  const r = transpile(CL + `export f(Cons(a, _)): number => a\nf(Cons(_, b)) => 0\nf(Nil) => 0\n`, "t.tsa");
+  assert.deepEqual(r.diagnostics.map((d) => d.message), ["Unreachable clause 'f(Cons(_, b))' (removed from output)"]);
+});
+
+test("ordinary TypeScript that looks like clauses is left alone", () => {
+  const src = `class A {
+  run(x: number): number {
+    return x;
+  }
+  go(f: (n: number) => number): number { return f(1); }
+}
+interface I {
+  cb(x: number): (y: number) => void;
+  other(): string
+}
+type T = { m(x: number): () => void };
+function over(x: number): number;
+function over(x: string): string;
+function over(x: any): any { return x; }
+console.log(over(1))
+console.log(new A().run(2))
+`;
+  assert.equal(transpile(src, "t.tsa").code, src);
+});
+
+test("type errors in clauses point at the .tsa source", () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, "c.tsa"), CL + `export length(Nil): number => 0\nlength(Cons(_, t)) => "one" + length(t)\n`);
+  const r = cli(path.join(dir, "c.tsa"), "--check");
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /c\.tsa:3:8: error TS2322: Type 'string \| 0' is not assignable to type 'number'/);
+});

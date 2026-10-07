@@ -42,7 +42,10 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
   constraints and defaults, and qualified constructor names (`Shape.Circle`)
   so types can share constructor names.
 - **`deriving (Eq, Ord, Show)`** for structural equality, ordering and
-  printing, with dictionary passing for type parameters. Values are immutable, and nullary constructors
+  printing, with dictionary passing for type parameters.
+- **Clause functions**, `length(Nil): number => 0` and
+  `length(Cons(_, t)) => 1 + length(t)`, with parameter types inferred from
+  the patterns. Values are immutable, and nullary constructors
   like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
   wildcards, or-patterns, named-field patterns, `x @ pattern` bindings,
@@ -295,6 +298,76 @@ const describe = (code: number) => match (code) {
   _ => "Other",
 };
 ```
+
+### Clause functions
+
+A function can also be written as a series of equations, one per case, as in
+Haskell or ML. Each clause gives a pattern for every parameter; the first
+clause that matches runs. Semicolons between clauses are optional.
+
+```ts
+export length(Nil): number => 0
+length(Cons(_, t)) => 1 + length(t)
+
+head(Cons(x, _)) => Some(x)
+head(Nil) => None
+
+fact(0): number => 1
+fact(n) if n > 0 => n * fact(n - 1)
+fact(_) => 1
+```
+
+Each group compiles to one ordinary function whose body is a `match` on its
+parameters, so exhaustiveness checking, guards, or-patterns and error mapping
+all apply:
+
+```ts
+export function length<T>(list: List<T>): number {
+  return ((__m0) => { /* ... */ })(list);
+}
+```
+
+**Types come from the patterns.** A constructor gives the parameter its data
+type, generic over the declaration's own type variables (`Cons(...)` gives
+`List<T>`). A literal gives `number`, `string` or `boolean`. Parameter names
+come from variables the clauses bind there, or from the type.
+
+**Annotate what the patterns cannot tell.** Write `pattern: Type` on a
+parameter in any one clause, and `name(...): Type =>` for the return type:
+
+```ts
+append(Nil, ys: List<T>): List<T> => ys          // ys is only ever a variable
+append(Cons(x, xs), ys) => Cons(x, append(xs, ys))
+
+sum(Nil: List<number>): number => 0               // the body adds the elements
+sum(Cons(h, t)) => h + sum(t)
+```
+
+You need an annotation in three cases, and tsadt tells you which:
+
+- a parameter that every clause matches with a plain variable or `_`;
+- a recursive function's return type (TypeScript cannot infer it and
+  reports TS7023);
+- a parameter whose type the body narrows, like `sum` above. tsadt infers
+  from patterns, not from how the body uses a value.
+
+Type variables in annotations are single capitals (`T`, `U`, `T2`), and
+`T` in `List<T>` is the same `T` as in the data declaration, so `append`'s two
+lists share an element type. To choose the type variables yourself, write
+them on the first clause (`swap<A, B>(...)`), or write a full signature, a
+bodiless TypeScript function declaration, just before the clauses:
+
+```ts
+function zip<A, B>(xs: List<A>, ys: List<B>): List<[A, B]>;
+zip(Cons(x, xt), Cons(y, yt)) => Cons([x, y] as [A, B], zip(xt, yt))
+zip(_, _) => Nil
+```
+
+Clause functions live at the top level of a file. A clause ends at the end
+of its line unless the expression clearly continues (an open bracket, a
+trailing operator, or a next line starting with one); a block body
+`=> { ... }` works as in `match`. Put `export` on the first clause or the
+signature.
 
 ### What it compiles to
 

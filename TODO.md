@@ -21,6 +21,7 @@ priority order.
 - [x] Named-field patterns: `Rect { width, height: h }`
 - [x] Qualified constructors (`Shape.Circle`), removing the global uniqueness rule
 - [x] `deriving (Eq, Ord, Show)`: structural equality, ordering and printing
+- [x] Clause functions: `length(Nil): number => 0` / `length(Cons(_, t)) => 1 + length(t)`, with parameter types inferred from patterns
 
 ## Next up
 
@@ -44,6 +45,12 @@ priority order.
 - [ ] Variant-preserving update: `p with { radius: 2 }`
 - [ ] GADTs: constructors that fix the type parameter, `Lit(n: number): Expr<number>`
 - [ ] Existential types
+
+## Clause functions
+
+- [ ] Clause functions inside other functions and blocks, not just at the top level
+- [ ] Infer element types from the body (`sum` over `List<number>`) for simple cases
+- [ ] Mutually recursive groups: name the cycle in the return-type message
 
 ## Code generation
 
