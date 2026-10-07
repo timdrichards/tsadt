@@ -1,0 +1,52 @@
+{
+  "name": "tsadt",
+  "version": "0.1.0",
+  "description": "Algebraic data types and pattern matching for TypeScript, compiled to plain TypeScript or JavaScript",
+  "main": "dist/index.js",
+  "directories": {
+    "example": "examples",
+    "test": "test"
+  },
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "test": "tsc && node --test test/*.test.mjs"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.4"
+  },
+  "type": "module",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "tsadt": "dist/cli.js"
+  },
+  "dependencies": {
+    "typescript": "^5.9.3"
+  },
+  "author": "Tim Richards",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/timdrichards/tsadt.git"
+  },
+  "homepage": "https://github.com/timdrichards/tsadt#readme",
+  "bugs": {
+    "url": "https://github.com/timdrichards/tsadt/issues"
+  },
+  "keywords": [
+    "typescript",
+    "algebraic-data-types",
+    "pattern-matching",
+    "adt",
+    "transpiler",
+    "exhaustiveness"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ]
+}

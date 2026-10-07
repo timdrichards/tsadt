@@ -1,0 +1,16 @@
+// Option: a value that may be absent.
+export data Option<T> = None | Some(value: T);
+
+export function getOrElse<T>(o: Option<T>, fallback: T): T {
+  return match (o) {
+    Some(v) => v,
+    None => fallback,
+  };
+}
+
+export function showOption<T>(o: Option<T>): string {
+  return match (o) {
+    Some(v) => `Some(${v})`,
+    None => "None",
+  };
+}

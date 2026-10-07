@@ -1,0 +1,71 @@
+// A tiny arithmetic language: evaluator, simplifier and printer.
+import { Option, Some, None } from "./option.js";
+
+export data Expr =
+  | Num(value: number)
+  | Var(name: string)
+  | Add(left: Expr, right: Expr)
+  | Mul(left: Expr, right: Expr)
+  | Neg(inner: Expr);
+
+export function evaluate(e: Expr, env: ReadonlyMap<string, number>): Option<number> {
+  return match (e) {
+    Num(n) => Some(n),
+    Var(x) => {
+      const v = env.get(x);
+      return v === undefined ? None : Some(v);
+    }
+    Add(a, b) => both(evaluate(a, env), evaluate(b, env), (x, y) => x + y),
+    Mul(a, b) => both(evaluate(a, env), evaluate(b, env), (x, y) => x * y),
+    Neg(a) => match (evaluate(a, env)) {
+      Some(v) => Some(-v),
+      None => None,
+    },
+  };
+}
+
+function both(a: Option<number>, b: Option<number>, f: (x: number, y: number) => number): Option<number> {
+  return match (a) {
+    Some(x) => match (b) {
+      Some(y) => Some(f(x, y)),
+      None => None,
+    },
+    None => None,
+  };
+}
+
+// Arm order matters: specific rewrites first, structural recursion after.
+export function simplify(e: Expr): Expr {
+  return match (e) {
+    Add(Num(0), x) => simplify(x),
+    Add(x, Num(0)) => simplify(x),
+    Mul(Num(1), x) => simplify(x),
+    Mul(x, Num(1)) => simplify(x),
+    Mul(Num(0), _) => Num(0),
+    Mul(_, Num(0)) => Num(0),
+    Add(Num(a), Num(b)) => Num(a + b),
+    Neg(Neg(x)) => simplify(x),
+    Add(a, b) => Add(simplify(a), simplify(b)),
+    Mul(a, b) => Mul(simplify(a), simplify(b)),
+    Neg(x) => Neg(simplify(x)),
+    leaf => leaf,
+  };
+}
+
+export function show(e: Expr): string {
+  return match (e) {
+    Num(n) if n < 0 => `(${n})`,
+    Num(n) => String(n),
+    Var(x) => x,
+    Add(a, b) => `${show(a)} + ${show(b)}`,
+    Mul(a, b) => `${paren(a)} * ${paren(b)}`,
+    Neg(x) => `-${paren(x)}`,
+  };
+}
+
+function paren(e: Expr): string {
+  return match (e) {
+    Add(_, _) => `(${show(e)})`,
+    _ => show(e),
+  };
+}

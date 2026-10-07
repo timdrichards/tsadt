@@ -1,0 +1,50 @@
+// A generic immutable linked list.
+import { Option, Some, None } from "./option.js";
+
+export data List<T> = Nil | Cons(head: T, tail: List<T>);
+
+export function fromArray<T>(xs: readonly T[]): List<T> {
+  let out: List<T> = Nil;
+  for (let i = xs.length - 1; i >= 0; i--) out = Cons(xs[i], out);
+  return out;
+}
+
+export function map<T, U>(xs: List<T>, f: (x: T) => U): List<U> {
+  return match (xs) {
+    Nil => Nil,
+    Cons(h, t) => Cons(f(h), map(t, f)),
+  };
+}
+
+export function sum(xs: List<number>): number {
+  return match (xs) {
+    Nil => 0,
+    Cons(h, t) => h + sum(t),
+  };
+}
+
+// Nested patterns: the second arm only fires for one-element lists.
+export function last<T>(xs: List<T>): Option<T> {
+  return match (xs) {
+    Nil => None,
+    Cons(x, Nil) => Some(x),
+    Cons(_, rest) => last(rest),
+  };
+}
+
+// Pairs up adjacent elements, dropping a leftover odd one.
+export function pairs<T>(xs: List<T>): List<[T, T]> {
+  return match (xs) {
+    Cons(a, Cons(b, rest)) => Cons([a, b] as [T, T], pairs(rest)),
+    _ => Nil,
+  };
+}
+
+// `t @ Cons(_, _)` binds the whole tail while also checking its shape.
+export function show<T>(xs: List<T>): string {
+  return match (xs) {
+    Nil => "[]",
+    Cons(h, Nil) => `[${h}]`,
+    Cons(h, t @ Cons(_, _)) => `[${h}, ` + show(t).slice(1),
+  };
+}

@@ -1,0 +1,64 @@
+// Runs every example. Also shows that ordinary uses of the words `data` and
+// `match` are left alone.
+import { fromArray, map, sum, last, pairs, show as showList } from "./list.js";
+import { Add, Mul, Neg, Num, Var, evaluate, simplify, show as showExpr } from "./expr.js";
+import { showOption } from "./option.js";
+
+data Shape =
+  | Circle(radius: number)
+  | Rect(width: number, height: number)
+  | Triangle(a: number, b: number, c: number);
+
+function area(s: Shape): number {
+  return match (s) {
+    Circle(r) => Math.PI * r * r,
+    Rect(w, h) => w * h,
+    Triangle(a, b, c) => {
+      const p = (a + b + c) / 2;
+      return Math.sqrt(p * (p - a) * (p - b) * (p - c));
+    }
+  };
+}
+
+function classify(s: Shape): string {
+  return match (s) {
+    Rect(w, h) if w === h => "square",
+    Rect(_, _) => "rectangle",
+    Circle(0) => "point",
+    Circle(_) => "circle",
+    Triangle(a, b, c) if a === b && b === c => "equilateral",
+    Triangle(_, _, _) => "triangle",
+  };
+}
+
+// Literal patterns and guards on a plain number.
+function status(code: number): string {
+  return match (code) {
+    200 => "OK",
+    404 => "Not Found",
+    c if c >= 500 => `Server Error ${c}`,
+    _ => "Other",
+  };
+}
+
+// Booleans are a finite type, so these two arms are exhaustive.
+const yesNo = (b: boolean) => match (b) { true => "yes", false => "no" };
+
+// Plain identifiers named data/match are untouched.
+const data = [1, 2, 3, 4, 5];
+const match = (re: RegExp, s: string) => re.test(s);
+const note = "match (x) { this is just a string }";
+
+const shapes: Shape[] = [Circle(1), Rect(2, 2), Rect(2, 3), Circle(0), Triangle(3, 4, 5), Triangle(2, 2, 2)];
+for (const s of shapes) console.log(classify(s), area(s).toFixed(2));
+console.log(status(200), status(404), status(503), status(302));
+console.log(yesNo(true), yesNo(false), match(/b/, "abc"), note.length);
+
+const xs = fromArray(data);
+console.log(showList(xs), sum(xs), showList(map(xs, (x) => x * 10)));
+console.log(showOption(last(xs)), showOption(last(fromArray<number>([]))));
+console.log(showList(pairs(xs)));
+
+const e = Add(Mul(Num(1), Var("x")), Neg(Neg(Add(Num(2), Num(0)))));
+console.log(showExpr(e), "=>", showExpr(simplify(e)));
+console.log(showOption(evaluate(e, new Map([["x", 40]]))), showOption(evaluate(e, new Map())));

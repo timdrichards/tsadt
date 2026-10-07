@@ -1,0 +1,13 @@
+circle 3.14
+square 4.00
+rectangle 6.00
+point 0.00
+triangle 6.00
+equilateral 1.73
+OK Not Found Server Error 503 Other
+yes no true 35
+[1, 2, 3, 4, 5] 15 [10, 20, 30, 40, 50]
+Some(5) None
+[1,2, 3,4]
+1 * x + --(2 + 0) => x + 2
+Some(42) None
