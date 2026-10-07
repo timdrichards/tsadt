@@ -24,13 +24,11 @@ export function evaluate(e: Expr, env: ReadonlyMap<string, number>): Option<numb
   };
 }
 
+// Matching two values at once: one pattern per value, in parentheses.
 function both(a: Option<number>, b: Option<number>, f: (x: number, y: number) => number): Option<number> {
-  return match (a) {
-    Some(x) => match (b) {
-      Some(y) => Some(f(x, y)),
-      None => None,
-    },
-    None => None,
+  return match (a, b) {
+    (Some(x), Some(y)) => Some(f(x, y)),
+    _ => None,
   };
 }
 

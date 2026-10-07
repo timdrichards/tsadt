@@ -44,7 +44,8 @@ const OPEN: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
 const CLOSE = new Set([")", "]", "}"]);
 
 interface Arm {
-  pat: Pattern;
+  /** One pattern per matched value. */
+  pats: Pattern[];
   guard: Mapped | null;
   guardPos: number;
   body: Mapped;
@@ -386,6 +387,38 @@ class Transpiler {
     return { pat: { k: "bind", name: t.text, sub: null, pos }, next: j + 1 };
   }
 
+  /**
+   * Parses the patterns of one arm. With several matched values that is a
+   * parenthesized tuple `(p1, ..., pn)`, or `_` for "anything". With one value
+   * a parenthesized pattern `(p)` is just grouping.
+   */
+  private parseArmPatterns(j: number, width: number): { pats: Pattern[]; next: number } {
+    if (this.text(j) === "(") {
+      const close = this.matching(j);
+      const pats: Pattern[] = [];
+      let k = j + 1;
+      while (k < close) {
+        const r = this.parsePattern(k);
+        pats.push(r.pat);
+        k = r.next;
+        if (this.text(k) === ",") k++;
+        else if (k !== close) throw new TsadtError(`Expected ',' or ')' in pattern but found ${this.describe(k)}`, this.posOf(k));
+      }
+      if (pats.length !== width) {
+        const what = width === 1 ? "one value" : `${width} values`;
+        throw new TsadtError(`This match is on ${what}, but the pattern has ${pats.length}`, this.posOf(j));
+      }
+      return { pats, next: close + 1 };
+    }
+    const { pat, next } = this.parsePattern(j);
+    if (width === 1) return { pats: [pat], next };
+    if (pat.k === "wild") return { pats: Array.from({ length: width }, () => pat), next };
+    throw new TsadtError(
+      `This match is on ${width} values, so each arm needs ${width} patterns in parentheses, like (${Array(width).fill("_").join(", ")}), or _ for anything`,
+      pat.pos,
+    );
+  }
+
   private validate(p: Pattern, names: Set<string>): void {
     switch (p.k) {
       case "bind":
@@ -426,13 +459,18 @@ class Transpiler {
     const bOpen = pClose + 1;
     const bClose = this.matching(bOpen);
 
+    // `match (a, b)` matches several values at once; each arm then has one
+    // pattern per value, written as a tuple: `(Some(x), _) => ...`.
+    const width = this.splitCommas(pOpen + 1, pClose, false).filter(([a, b]) => a < b).length;
+
     const arms: Arm[] = [];
     let usesAwait = false;
     let j = bOpen + 1;
     while (j < bClose) {
       const armStart = j;
-      const { pat, next } = this.parsePattern(j);
-      this.validate(pat, new Set());
+      const { pats, next } = this.parseArmPatterns(j, width);
+      const names = new Set<string>();
+      for (const p of pats) this.validate(p, names);
       j = next;
 
       let guard: Mapped | null = null;
@@ -444,7 +482,7 @@ class Transpiler {
         guardPos = this.posOf(j + 1);
         j = g;
       }
-      this.expect(j, "=>", `'=>' after pattern ${showPattern(pat)}`);
+      this.expect(j, "=>", `'=>' after pattern ${showArm(pats)}`);
       j++;
 
       let body: Mapped;
@@ -464,13 +502,13 @@ class Transpiler {
       for (let k = armStart; k < j; k++) if (this.text(k) === "await") usesAwait = true;
       if (this.text(j) === ",") j++;
       else if (j < bClose && !block) throw new TsadtError(`Expected ',' between match arms but found ${this.describe(j)}`, this.posOf(j));
-      arms.push({ pat, guard, guardPos, body, bodyPos, block, pos: this.posOf(armStart) });
+      arms.push({ pats, guard, guardPos, body, bodyPos, block, pos: this.posOf(armStart) });
     }
     if (arms.length === 0) throw new TsadtError("match has no arms", matchPos);
 
-    const check = checkMatch(arms.map((a) => ({ pat: a.pat, guarded: a.guard !== null })), this.reg);
+    const check = checkMatch(arms.map((a) => ({ pats: a.pats, guarded: a.guard !== null })), this.reg);
     for (const k of check.redundant) {
-      this.report("warning", `Unreachable match arm '${showPattern(arms[k].pat)}' (removed from output)`, arms[k].pos);
+      this.report("warning", `Unreachable match arm '${showArm(arms[k].pats)}' (removed from output)`, arms[k].pos);
     }
     if (check.missing !== null) {
       this.report("error", `Non-exhaustive match: no arm covers ${check.missing}`, matchPos);
@@ -478,7 +516,7 @@ class Transpiler {
     const live = arms.filter((_, k) => !check.redundant.includes(k));
     const out = new Mapped();
     if (!usesAwait && this.needsAsiGuard(i)) out.gen(";", matchPos);
-    out.add(this.genMatch(live, scrutinee, usesAwait, matchPos));
+    out.add(this.genMatch(live, width, scrutinee, usesAwait, matchPos));
     return { out, next: bClose + 1 };
   }
 
@@ -515,17 +553,19 @@ class Transpiler {
     }
   }
 
-  private genMatch(arms: Arm[], scrutinee: Mapped, isAsync: boolean, pos: number): Mapped {
+  private genMatch(arms: Arm[], width: number, scrutinee: Mapped, isAsync: boolean, pos: number): Mapped {
     const m = new Mapped();
-    const v = `__m${this.counter++}`;
+    // One parameter per matched value: (__m0) or (__m0_0, __m0_1, ...).
+    const base = `__m${this.counter++}`;
+    const vars = width === 1 ? [base] : Array.from({ length: width }, (_, k) => `${base}_${k}`);
     const NL = "\n" + this.indentAt(pos);
     const asyncKw = isAsync ? "async " : "";
-    m.gen(`${isAsync ? "(await " : ""}(${asyncKw}(${v}) => {`, pos);
+    m.gen(`${isAsync ? "(await " : ""}(${asyncKw}(${vars.join(", ")}) => {`, pos);
     let irrefutable = false;
     for (const arm of arms) {
       const conds: Array<[string, number]> = [];
       const binds: Array<[string, number]> = [];
-      this.compilePattern(arm.pat, v, conds, binds);
+      arm.pats.forEach((p, k) => this.compilePattern(p, vars[k], conds, binds));
       const wrapped = conds.length > 0 || arm.guard !== null;
       const indent = wrapped ? "    " : "  ";
       if (conds.length > 0) {
@@ -554,6 +594,10 @@ class Transpiler {
     m.gen(`${NL}})(`, pos).add(scrutinee).gen(`)${isAsync ? ")" : ""}`, pos);
     return m;
   }
+}
+
+function showArm(pats: Pattern[]): string {
+  return pats.length === 1 ? showPattern(pats[0]) : `(${pats.map(showPattern).join(", ")})`;
 }
 
 function register(reg: Registry, d: DataDecl, error: (msg: string) => void): void {

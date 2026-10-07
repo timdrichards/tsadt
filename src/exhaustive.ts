@@ -128,26 +128,31 @@ function render(m: Member, args: string[]): string {
 }
 
 export interface ArmInfo {
-  pat: Pattern;
+  /** One pattern per matched value. */
+  pats: Pattern[];
   guarded: boolean;
 }
 
 export interface CheckResult {
   /** Indices of arms that can never be reached. */
   redundant: number[];
-  /** An example value no arm covers, or null if the match is exhaustive. */
+  /**
+   * An example value no arm covers (shown as a tuple when matching several
+   * values), or null if the match is exhaustive.
+   */
   missing: string | null;
 }
 
 export function checkMatch(arms: ArmInfo[], reg: Registry): CheckResult {
   const c = new Checker(reg);
+  const width = arms[0]?.pats.length ?? 1;
   const covering: Row[] = [];
   const redundant: number[] = [];
   arms.forEach((arm, i) => {
-    const row = [normalize(arm.pat)];
+    const row = arm.pats.map(normalize);
     if (!c.useful(covering, row)) redundant.push(i);
     else if (!arm.guarded) covering.push(row);
   });
-  const w = c.witness(covering, 1);
-  return { redundant, missing: w ? w[0] : null };
+  const w = c.witness(covering, width);
+  return { redundant, missing: w ? (width === 1 ? w[0] : `(${w.join(", ")})`) : null };
 }

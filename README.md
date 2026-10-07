@@ -42,8 +42,9 @@ expr.tsa:8:10: error: Non-exhaustive match: no arm covers Num(_)
   constraints and defaults. Values are immutable, and nullary constructors
   like `Nil` work for every type argument.
 - **`match` expressions** with nested constructor patterns, literals,
-  wildcards, `x @ pattern` bindings, `if` guards and block bodies. A `match`
-  is an expression, so it nests and composes.
+  wildcards, `x @ pattern` bindings, `if` guards and block bodies. Match
+  several values at once with `match (a, b) { (p, q) => ... }`. A `match` is
+  an expression, so it nests and composes.
 - **Exhaustiveness and redundancy checking** using Maranget's usefulness
   algorithm, the one OCaml and Rust use. Missing cases are errors with a
   counterexample; unreachable arms are warnings.
@@ -145,10 +146,33 @@ match (value) {
 | `0`, `-1`, `"hi"`                    | a number or string literal                  |
 | `true`, `false`, `null`, `undefined` | that value                                  |
 | `t @ Cons(_, _)`                     | what the inner pattern matches, also binding `t` |
+| `(p, q)`                             | with `match (a, b)`: `a` against `p` and `b` against `q` |
 
 Arms are tried in order. A guard can use the pattern's variables, and a
 guarded arm never counts toward exhaustiveness. Booleans and `data` types
 are finite; numbers and strings need a catch-all arm.
+
+To match several values at once, list them in the `match` and give each arm
+one pattern per value, in parentheses. `_` on its own matches everything:
+
+```ts
+function both(a: Option<number>, b: Option<number>): Option<number> {
+  return match (a, b) {
+    (Some(x), Some(y)) => Some(x + y),
+    _ => None,
+  };
+}
+
+const fizz = (n: number) => match (n % 3, n % 5) {
+  (0, 0) => "FizzBuzz",
+  (0, _) => "Fizz",
+  (_, 0) => "Buzz",
+  _ => String(n),
+};
+```
+
+Exhaustiveness is checked across all the values together, and a missing case
+is reported as a tuple, such as `no arm covers (Some(_), None)`.
 
 ```ts
 const describe = (code: number) => match (code) {
@@ -231,7 +255,9 @@ There is also a library API in `dist/index.js`: `transpile`,
 ## Limitations
 
 - An expression arm ends at the first comma outside brackets, so a body like
-  `new Map<string, number>()` needs parentheses. Object literal bodies need
+  `new Map<string, number>()` needs parentheses. Likewise a comma in the
+  `match (...)` header separates values, so a call with explicit type
+  arguments there, like `f<A, B>(x)`, needs its own parentheses. Object literal bodies need
   them too, as with arrow functions: `A => ({ x: 1 })`.
 - `yield` inside an arm does not work, and a `match` inside a template
   literal's `${...}` is not translated.
@@ -240,8 +266,8 @@ There is also a library API in `dist/index.js`: `transpile`,
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for the full list. Next up: matching on several values
-at once, or-patterns, and named-field patterns.
+See [TODO.md](TODO.md) for the full list. Next up: or-patterns and named-field
+patterns.
 
 ## Development
 

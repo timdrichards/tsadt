@@ -330,3 +330,75 @@ test("the library API maps generated offsets back to source positions", () => {
   assert.deepEqual(at('.tag === "B"'), { line: 2, col: 41 }); // generated: the B(n) pattern
   assert.deepEqual(at("const n ="), { line: 2, col: 43 }); // generated: the n binding
 });
+
+// ------------------------------------------------------ multi-value match
+
+const OPT = `data Opt<T> = None | Some(value: T);\n`;
+
+test("matching several values at once", () => {
+  const out = run(OPT + LIST + `
+    const add = (a: Opt<number>, b: Opt<number>): Opt<number> => match (a, b) {
+      (Some(x), Some(y)) => Some(x + y),
+      (Some(x), None) => Some(x),
+      (None, y) => y,
+    };
+    const show = (o: Opt<number>) => match (o) { Some(v) => String(v), None => "none" };
+    console.log(show(add(Some(1), Some(2))), show(add(Some(5), None)), show(add(None, Some(7))), show(add(None, None)));
+
+    // zip two lists; three values, with a literal in the mix
+    const zip = <A, B>(xs: List<A>, ys: List<B>): List<[A, B]> => match (xs, ys) {
+      (Cons(x, xt), Cons(y, yt)) => Cons([x, y] as [A, B], zip(xt, yt)),
+      _ => Nil,
+    };
+    const len = <T,>(l: List<T>): number => match (l) { Nil => 0, Cons(_, t) => 1 + len(t) };
+    console.log(len(zip(Cons(1, Cons(2, Cons(3, Nil))), Cons("a", Cons("b", Nil)))));
+
+    const fizz = (n: number) => match (n % 3, n % 5) {
+      (0, 0) => "FizzBuzz",
+      (0, _) => "Fizz",
+      (_, 0) => "Buzz",
+      _ => String(n),
+    };
+    console.log([1, 3, 5, 15].map(fizz).join(" "));
+
+    // booleans are finite, so this is exhaustive with no catch-all
+    const quadrant = (x: number, y: number) => match (x >= 0, y >= 0) {
+      (true, true) => 1, (false, true) => 2, (false, false) => 3, (true, false) => 4,
+    };
+    console.log(quadrant(1, 1), quadrant(-1, 1), quadrant(-1, -1), quadrant(1, -1));`);
+  assert.equal(out, "3 5 7 none\n2\n1 Fizz Buzz FizzBuzz\n1 2 3 4\n");
+});
+
+test("exhaustiveness across several values names the missing combination", () => {
+  assert.deepEqual(errorsOf(OPT + `const f = (a: Opt<number>, b: Opt<number>) => match (a, b) {
+    (Some(_), Some(_)) => 1, (None, _) => 2 };`), ["Non-exhaustive match: no arm covers (Some(_), None)"]);
+  assert.deepEqual(errorsOf(`const f = (p: boolean, q: boolean) => match (p, q) {
+    (true, _) => 1, (false, true) => 2 };`), ["Non-exhaustive match: no arm covers (false, false)"]);
+});
+
+test("unreachable tuple arms are reported", () => {
+  const r = transpile(OPT + `const f = (a: Opt<number>, b: Opt<number>) => match (a, b) {
+    (Some(_), _) => 1, (None, _) => 2, (Some(x), Some(_)) => x };`, "t.tsa");
+  assert.deepEqual(r.diagnostics.map((d) => d.message), ["Unreachable match arm '(Some(x), Some(_))' (removed from output)"]);
+});
+
+test("tuple pattern errors", () => {
+  assert.deepEqual(errorsOf(OPT + `const f = (a: Opt<number>, b: Opt<number>) => match (a, b) { (Some(x)) => x, _ => 0 };`), [
+    "This match is on 2 values, but the pattern has 1",
+  ]);
+  assert.deepEqual(errorsOf(OPT + `const f = (a: Opt<number>, b: Opt<number>) => match (a, b) { pair => 0 };`), [
+    "This match is on 2 values, so each arm needs 2 patterns in parentheses, like (_, _), or _ for anything",
+  ]);
+  assert.deepEqual(errorsOf(OPT + `const f = (a: Opt<number>, b: Opt<number>) => match (a, b) { (Some(x), Some(x)) => x, _ => 0 };`), [
+    "Variable 'x' is bound twice in one pattern",
+  ]);
+});
+
+test("one value: parentheses group; double parentheses keep a comma expression", () => {
+  const out = run(OPT + `
+    const g = (o: Opt<number>) => match (o) { (Some(v)) => v, (None) => 0 };
+    let calls = 0;
+    const h = match ((calls++, Some(4))) { Some(v) => v, None => 0 };
+    console.log(g(Some(2)), g(None), h, calls);`);
+  assert.equal(out, "2 0 4 1\n");
+});

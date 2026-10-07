@@ -16,10 +16,10 @@ priority order.
 - [x] `--check` for type checking the generated TypeScript
 - [x] `--tsconfig` for compiler options
 - [x] Type errors reported at `.tsa` line and column
+- [x] Match on several values at once: `match (a, b) { (Some(x), Some(y)) => ... }`
 
 ## Next up
 
-- [ ] Match on several values at once: `match (a, b) { (Some(x), Some(y)) => ... }`
 - [ ] Or-patterns: `Circle(_) | Rect(_, _) => ...`, with the same variables bound in every alternative
 - [ ] Named-field patterns: `Rect { width, height: h }`
 
